@@ -1,0 +1,20 @@
+[Unit]
+Description=Bazi Chi Telegram Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/opt/bazi_chi_bot
+EnvironmentFile=/opt/bazi_chi_bot/.env
+ExecStart=/opt/bazi_chi_bot/.venv/bin/bazi_chi_bot
+
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

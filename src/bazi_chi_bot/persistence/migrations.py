@@ -1,0 +1,696 @@
+"""Append-only schema history. Never edit an applied migration."""
+
+MIGRATIONS: tuple[str, ...] = (
+    """
+    CREATE TABLE users (
+        telegram_id INTEGER PRIMARY KEY,
+        username TEXT,
+        first_name TEXT NOT NULL,
+        last_name TEXT,
+        display_name TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+    );
+
+    CREATE TABLE user_stats (
+        telegram_id INTEGER PRIMARY KEY REFERENCES users(telegram_id) ON DELETE CASCADE,
+        games_played INTEGER NOT NULL DEFAULT 0 CHECK (games_played >= 0),
+        wins INTEGER NOT NULL DEFAULT 0 CHECK (wins >= 0),
+        losses INTEGER NOT NULL DEFAULT 0 CHECK (losses >= 0),
+        correct_guesses INTEGER NOT NULL DEFAULT 0 CHECK (correct_guesses >= 0),
+        wrong_guesses INTEGER NOT NULL DEFAULT 0 CHECK (wrong_guesses >= 0),
+        points_won INTEGER NOT NULL DEFAULT 0 CHECK (points_won >= 0)
+    );
+
+    CREATE TABLE games (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        invite_token TEXT NOT NULL UNIQUE,
+        creator_id INTEGER NOT NULL REFERENCES users(telegram_id),
+        player2_id INTEGER REFERENCES users(telegram_id),
+        fists INTEGER NOT NULL CHECK (fists BETWEEN 2 AND 6),
+        total_hands INTEGER NOT NULL CHECK (total_hands IN (3, 5, 7, 9)),
+        hand_number INTEGER NOT NULL DEFAULT 1 CHECK (hand_number >= 1),
+        first_hider_id INTEGER REFERENCES users(telegram_id),
+        hider_id INTEGER REFERENCES users(telegram_id),
+        guesser_id INTEGER REFERENCES users(telegram_id),
+        hidden_fist INTEGER,
+        player1_score INTEGER NOT NULL DEFAULT 0 CHECK (player1_score >= 0),
+        player2_score INTEGER NOT NULL DEFAULT 0 CHECK (player2_score >= 0),
+        status TEXT NOT NULL DEFAULT 'waiting'
+            CHECK (status IN ('waiting', 'active', 'choice', 'finished', 'cancelled')),
+        phase TEXT NOT NULL DEFAULT 'waiting'
+            CHECK (phase IN ('waiting', 'hiding', 'guessing', 'choice', 'finished', 'cancelled')),
+        winner_id INTEGER REFERENCES users(telegram_id),
+        loser_id INTEGER REFERENCES users(telegram_id),
+        final_choice TEXT CHECK (final_choice IS NULL OR final_choice IN ('truth', 'dare')),
+        version INTEGER NOT NULL DEFAULT 0 CHECK (version >= 0),
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        CHECK (player2_id IS NULL OR player2_id != creator_id),
+        CHECK (hidden_fist IS NULL OR hidden_fist BETWEEN 1 AND fists)
+    );
+
+    CREATE INDEX idx_games_creator_status ON games(creator_id, status);
+    CREATE INDEX idx_games_player2_status ON games(player2_id, status);
+    CREATE INDEX idx_games_invite_token ON games(invite_token);
+    """,
+    """
+    ALTER TABLE games ADD COLUMN final_prompt_text TEXT;
+    ALTER TABLE games ADD COLUMN final_response_text TEXT;
+    """,
+    """
+    CREATE TABLE countdowns (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        creator_id INTEGER NOT NULL REFERENCES users(telegram_id),
+        target_user_id INTEGER NOT NULL REFERENCES users(telegram_id),
+        target_at INTEGER NOT NULL,
+        next_run_at INTEGER NOT NULL,
+        status TEXT NOT NULL DEFAULT 'active'
+            CHECK (status IN ('active', 'completed', 'cancelled')),
+        created_at INTEGER NOT NULL,
+        last_sent_at INTEGER,
+        completed_at INTEGER
+    );
+
+    CREATE UNIQUE INDEX idx_countdowns_one_active_per_target
+        ON countdowns(target_user_id) WHERE status = 'active';
+    CREATE INDEX idx_countdowns_due
+        ON countdowns(status, next_run_at);
+    """,
+    """
+    ALTER TABLE games ADD COLUMN game_type TEXT NOT NULL DEFAULT 'gol_ya_pooch'
+        CHECK (game_type IN ('gol_ya_pooch', 'tic_tac_toe'));
+    ALTER TABLE games ADD COLUMN board TEXT NOT NULL DEFAULT '.........'
+        CHECK (length(board) = 9 AND board NOT GLOB '*[^.XO]*');
+    ALTER TABLE games ADD COLUMN next_player_id INTEGER REFERENCES users(telegram_id);
+    ALTER TABLE games ADD COLUMN round_starter_id INTEGER REFERENCES users(telegram_id);
+    """,
+    """
+    CREATE TABLE questions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        kind TEXT NOT NULL CHECK (kind IN ('truth', 'dare')),
+        text TEXT NOT NULL CHECK (length(trim(text)) BETWEEN 1 AND 3000),
+        active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1)),
+        UNIQUE (kind, text)
+    );
+    ALTER TABLE games ADD COLUMN final_question_id INTEGER REFERENCES questions(id);
+    CREATE TABLE question_answers (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        game_id INTEGER NOT NULL UNIQUE REFERENCES games(id),
+        question_id INTEGER NOT NULL REFERENCES questions(id),
+        respondent_id INTEGER NOT NULL REFERENCES users(telegram_id),
+        opponent_id INTEGER NOT NULL REFERENCES users(telegram_id),
+        question_text TEXT NOT NULL,
+        response_text TEXT,
+        asked_at INTEGER NOT NULL,
+        answered_at INTEGER,
+        CHECK (respondent_id != opponent_id),
+        UNIQUE (question_id, respondent_id, opponent_id)
+    );
+    CREATE INDEX idx_questions_kind_active ON questions(kind, active);
+    """,
+    """
+    ALTER TABLE games ADD COLUMN final_response_approved INTEGER
+        CHECK (final_response_approved IN (0, 1));
+    ALTER TABLE games ADD COLUMN final_reviewed_at INTEGER;
+    """,
+    """
+    CREATE TABLE score_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL REFERENCES users(telegram_id),
+        game_id INTEGER REFERENCES games(id),
+        reason TEXT NOT NULL CHECK (reason IN ('legacy', 'round', 'challenge')),
+        hand_number INTEGER,
+        amount INTEGER NOT NULL CHECK (amount > 0),
+        created_at INTEGER NOT NULL,
+        CHECK (
+            (reason = 'legacy' AND game_id IS NULL AND hand_number IS NULL)
+            OR (reason = 'round' AND game_id IS NOT NULL AND hand_number IS NOT NULL
+                AND hand_number >= 1 AND amount = 1)
+            OR (reason = 'challenge' AND game_id IS NOT NULL AND hand_number IS NULL AND amount = 1)
+        )
+    );
+    CREATE UNIQUE INDEX idx_score_legacy ON score_events(user_id) WHERE reason = 'legacy';
+    CREATE UNIQUE INDEX idx_score_round ON score_events(game_id, hand_number) WHERE reason = 'round';
+    CREATE UNIQUE INDEX idx_score_challenge ON score_events(game_id) WHERE reason = 'challenge';
+    CREATE INDEX idx_score_user ON score_events(user_id, id);
+
+    -- Older releases retained totals, not round histories. Preserve these as opening balances.
+    INSERT INTO score_events (user_id, reason, amount, created_at)
+        SELECT telegram_id, 'legacy', points_won, unixepoch() FROM user_stats WHERE points_won > 0;
+
+    CREATE TRIGGER score_event_updates_total AFTER INSERT ON score_events
+    BEGIN
+        UPDATE user_stats SET points_won = points_won + NEW.amount WHERE telegram_id = NEW.user_id;
+    END;
+    CREATE TRIGGER score_event_valid_player BEFORE INSERT ON score_events
+    WHEN NEW.game_id IS NOT NULL
+    BEGIN
+        SELECT CASE WHEN NOT EXISTS (
+            SELECT 1 FROM games g WHERE g.id = NEW.game_id
+                AND NEW.user_id IN (g.creator_id, g.player2_id)
+        ) THEN RAISE(ABORT, 'Score recipient is not a player') END;
+    END;
+    CREATE TRIGGER score_event_no_update BEFORE UPDATE ON score_events
+    BEGIN
+        SELECT RAISE(ABORT, 'Score events are immutable');
+    END;
+    CREATE TRIGGER score_event_no_delete BEFORE DELETE ON score_events
+    BEGIN
+        SELECT RAISE(ABORT, 'Score events are immutable');
+    END;
+
+    CREATE INDEX idx_games_pending_prompt ON games(winner_id, updated_at DESC, id DESC)
+        WHERE status = 'finished' AND final_choice IS NOT NULL AND final_prompt_text IS NULL;
+    CREATE INDEX idx_games_pending_response ON games(loser_id, updated_at DESC, id DESC)
+        WHERE status = 'finished' AND final_choice IS NOT NULL AND final_response_text IS NULL;
+    CREATE INDEX idx_games_pending_review ON games(winner_id, updated_at DESC, id DESC)
+        WHERE status = 'finished' AND final_response_text IS NOT NULL AND final_response_approved IS NULL;
+    CREATE INDEX idx_users_username ON users(username COLLATE NOCASE, updated_at DESC);
+
+    CREATE TRIGGER answer_matches_game BEFORE INSERT ON question_answers
+    BEGIN
+        SELECT CASE WHEN NOT EXISTS (
+            SELECT 1 FROM games g WHERE g.id = NEW.game_id
+                AND g.loser_id = NEW.respondent_id AND g.winner_id = NEW.opponent_id
+        ) THEN RAISE(ABORT, 'Answer participants do not match the game') END;
+    END;
+    """,
+    """
+    ALTER TABLE games ADD COLUMN challenge_kind TEXT;
+    ALTER TABLE games ADD COLUMN challenge_question_id INTEGER;
+    ALTER TABLE games ADD COLUMN challenge_prompt_text TEXT;
+    ALTER TABLE games ADD COLUMN challenge_response_text TEXT;
+    ALTER TABLE games ADD COLUMN challenge_approved INTEGER;
+    ALTER TABLE games ADD COLUMN challenge_asker_id INTEGER;
+    ALTER TABLE games ADD COLUMN challenge_respondent_id INTEGER;
+    CREATE TABLE challenge_rounds (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        game_id INTEGER NOT NULL REFERENCES games(id),
+        round_number INTEGER NOT NULL CHECK (round_number >= 1),
+        kind TEXT NOT NULL CHECK (kind IN ('truth', 'dare')),
+        question_id INTEGER NOT NULL REFERENCES questions(id),
+        asker_id INTEGER NOT NULL REFERENCES users(telegram_id),
+        respondent_id INTEGER NOT NULL REFERENCES users(telegram_id),
+        question_text TEXT NOT NULL,
+        response_text TEXT,
+        approved INTEGER CHECK (approved IN (0, 1)),
+        created_at INTEGER NOT NULL,
+        answered_at INTEGER,
+        reviewed_at INTEGER,
+        UNIQUE (game_id, round_number),
+        UNIQUE (question_id, respondent_id, asker_id)
+    );
+    CREATE INDEX idx_challenge_round_pending ON challenge_rounds(respondent_id, response_text);
+    """,
+    """
+    DROP INDEX IF EXISTS idx_score_challenge;
+    CREATE UNIQUE INDEX idx_score_challenge ON score_events(game_id, hand_number)
+        WHERE reason = 'challenge';
+    """,
+    """
+    -- Extend the original game_type CHECK without rebuilding the table or losing rows.
+    PRAGMA writable_schema = ON;
+    UPDATE sqlite_master SET sql = replace(
+        sql,
+        'game_type IN (''gol_ya_pooch'', ''tic_tac_toe'')',
+        'game_type IN (''gol_ya_pooch'', ''tic_tac_toe'', ''truth_or_dare'')'
+    ) WHERE type = 'table' AND name = 'games';
+    PRAGMA schema_version = 999;
+    PRAGMA writable_schema = OFF;
+    INSERT INTO score_events (user_id, reason, amount, created_at)
+        SELECT telegram_id, 'legacy', points_won, unixepoch() FROM user_stats
+        WHERE points_won > 0 AND NOT EXISTS (
+            SELECT 1 FROM score_events s WHERE s.user_id = user_stats.telegram_id
+                AND s.reason = 'legacy'
+        );
+    UPDATE user_stats SET points_won = (
+        SELECT COALESCE(SUM(amount), 0) FROM score_events s
+        WHERE s.user_id = user_stats.telegram_id
+    );
+    """,
+    """
+    CREATE TABLE sponsors (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        kind TEXT NOT NULL CHECK (kind IN ('channel', 'bot')),
+        title TEXT NOT NULL CHECK (length(trim(title)) BETWEEN 1 AND 120),
+        chat_id TEXT,
+        username TEXT,
+        url TEXT NOT NULL,
+        active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1)),
+        created_at INTEGER NOT NULL,
+        CHECK (kind = 'channel' OR username IS NOT NULL)
+    );
+    CREATE UNIQUE INDEX idx_sponsors_channel_key ON sponsors(kind, chat_id)
+        WHERE kind = 'channel';
+    CREATE UNIQUE INDEX idx_sponsors_bot_key ON sponsors(kind, username)
+        WHERE kind = 'bot';
+    CREATE INDEX idx_sponsors_active ON sponsors(active, id);
+    -- Users may have been inserted after the previous score backfill migration.
+    INSERT INTO score_events (user_id, reason, amount, created_at)
+        SELECT telegram_id, 'legacy', points_won, unixepoch() FROM user_stats
+        WHERE points_won > 0 AND NOT EXISTS (
+            SELECT 1 FROM score_events s WHERE s.user_id = user_stats.telegram_id
+                AND s.reason = 'legacy'
+        );
+    UPDATE user_stats SET points_won = (
+        SELECT COALESCE(SUM(amount), 0) FROM score_events s WHERE s.user_id = user_stats.telegram_id
+    );
+    """,
+    """
+    ALTER TABLE users ADD COLUMN profile_photo_file_id TEXT;
+    INSERT INTO score_events (user_id, reason, amount, created_at)
+        SELECT telegram_id, 'legacy', points_won, unixepoch() FROM user_stats
+        WHERE points_won > 0 AND NOT EXISTS (
+            SELECT 1 FROM score_events s WHERE s.user_id = user_stats.telegram_id
+                AND s.reason = 'legacy'
+        );
+    UPDATE user_stats SET points_won = (
+        SELECT COALESCE(SUM(amount), 0) FROM score_events s WHERE s.user_id = user_stats.telegram_id
+    );
+    """,
+    """
+    -- Older databases required challenge hand_number to be NULL. Independent
+    -- truth-or-dare needs one immutable challenge score event per round.
+    DROP TRIGGER IF EXISTS score_event_updates_total;
+    DROP TRIGGER IF EXISTS score_event_valid_player;
+    DROP TRIGGER IF EXISTS score_event_no_update;
+    DROP TRIGGER IF EXISTS score_event_no_delete;
+    DROP INDEX IF EXISTS idx_score_legacy;
+    DROP INDEX IF EXISTS idx_score_round;
+    DROP INDEX IF EXISTS idx_score_challenge;
+    DROP INDEX IF EXISTS idx_score_user;
+
+    ALTER TABLE score_events RENAME TO score_events_old;
+    CREATE TABLE score_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL REFERENCES users(telegram_id),
+        game_id INTEGER REFERENCES games(id),
+        reason TEXT NOT NULL CHECK (reason IN ('legacy', 'round', 'challenge')),
+        hand_number INTEGER,
+        amount INTEGER NOT NULL CHECK (amount > 0),
+        created_at INTEGER NOT NULL,
+        CHECK (
+            (reason = 'legacy' AND game_id IS NULL AND hand_number IS NULL)
+            OR (reason = 'round' AND game_id IS NOT NULL AND hand_number IS NOT NULL
+                AND hand_number >= 1 AND amount = 1)
+            OR (reason = 'challenge' AND game_id IS NOT NULL AND hand_number IS NOT NULL
+                AND hand_number >= 1 AND amount = 1)
+        )
+    );
+    INSERT INTO score_events (id, user_id, game_id, reason, hand_number, amount, created_at)
+        SELECT id, user_id, game_id, reason,
+            CASE WHEN reason = 'challenge' THEN COALESCE(
+                hand_number,
+                (SELECT hand_number FROM games WHERE games.id = score_events_old.game_id),
+                1
+            ) ELSE hand_number END,
+            amount, created_at
+        FROM score_events_old;
+    DROP TABLE score_events_old;
+    INSERT INTO score_events (user_id, reason, amount, created_at)
+        SELECT telegram_id, 'legacy', points_won, unixepoch() FROM user_stats
+        WHERE points_won > 0 AND NOT EXISTS (
+            SELECT 1 FROM score_events s WHERE s.user_id = user_stats.telegram_id
+                AND s.reason = 'legacy'
+        );
+
+    CREATE UNIQUE INDEX idx_score_legacy ON score_events(user_id) WHERE reason = 'legacy';
+    CREATE UNIQUE INDEX idx_score_round ON score_events(game_id, hand_number)
+        WHERE reason = 'round';
+    CREATE UNIQUE INDEX idx_score_challenge ON score_events(game_id, hand_number)
+        WHERE reason = 'challenge';
+    CREATE INDEX idx_score_user ON score_events(user_id, id);
+
+    CREATE TRIGGER score_event_updates_total AFTER INSERT ON score_events
+    BEGIN
+        UPDATE user_stats SET points_won = points_won + NEW.amount WHERE telegram_id = NEW.user_id;
+    END;
+    CREATE TRIGGER score_event_valid_player BEFORE INSERT ON score_events
+    WHEN NEW.game_id IS NOT NULL
+    BEGIN
+        SELECT CASE WHEN NOT EXISTS (
+            SELECT 1 FROM games g WHERE g.id = NEW.game_id
+                AND NEW.user_id IN (g.creator_id, g.player2_id)
+        ) THEN RAISE(ABORT, 'Score recipient is not a player') END;
+    END;
+    CREATE TRIGGER score_event_no_update BEFORE UPDATE ON score_events
+    BEGIN
+        SELECT RAISE(ABORT, 'Score events are immutable');
+    END;
+    CREATE TRIGGER score_event_no_delete BEFORE DELETE ON score_events
+    BEGIN
+        SELECT RAISE(ABORT, 'Score events are immutable');
+    END;
+
+    UPDATE user_stats SET points_won = (
+        SELECT COALESCE(SUM(amount), 0) FROM score_events s WHERE s.user_id = user_stats.telegram_id
+    );
+    """,
+    """
+    CREATE TABLE game_messages (
+        game_id INTEGER NOT NULL REFERENCES games(id) ON DELETE CASCADE,
+        user_id INTEGER NOT NULL REFERENCES users(telegram_id) ON DELETE CASCADE,
+        chat_id INTEGER NOT NULL,
+        message_id INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY (game_id, user_id)
+    );
+    INSERT INTO score_events (user_id, reason, amount, created_at)
+        SELECT telegram_id, 'legacy', points_won, unixepoch() FROM user_stats
+        WHERE points_won > 0 AND NOT EXISTS (
+            SELECT 1 FROM score_events s WHERE s.user_id = user_stats.telegram_id
+                AND s.reason = 'legacy'
+        );
+    UPDATE user_stats SET points_won = (
+        SELECT COALESCE(SUM(amount), 0) FROM score_events s WHERE s.user_id = user_stats.telegram_id
+    );
+    """,
+    """
+    -- Keep monthly login rewards in the immutable score history while making
+    -- one reward per user and calendar month idempotent.
+    DROP TRIGGER IF EXISTS score_event_updates_total;
+    DROP TRIGGER IF EXISTS score_event_valid_player;
+    DROP TRIGGER IF EXISTS score_event_no_update;
+    DROP TRIGGER IF EXISTS score_event_no_delete;
+    DROP INDEX IF EXISTS idx_score_legacy;
+    DROP INDEX IF EXISTS idx_score_round;
+    DROP INDEX IF EXISTS idx_score_challenge;
+    DROP INDEX IF EXISTS idx_score_user;
+
+    ALTER TABLE score_events RENAME TO score_events_old;
+    CREATE TABLE score_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL REFERENCES users(telegram_id),
+        game_id INTEGER REFERENCES games(id),
+        reason TEXT NOT NULL CHECK (reason IN ('legacy', 'round', 'challenge', 'login')),
+        hand_number INTEGER,
+        period_start INTEGER,
+        amount INTEGER NOT NULL CHECK (amount > 0),
+        created_at INTEGER NOT NULL,
+        CHECK (
+            (reason = 'legacy' AND game_id IS NULL AND hand_number IS NULL)
+            OR (reason = 'login' AND game_id IS NULL AND hand_number IS NULL
+                AND period_start IS NOT NULL AND amount = 1)
+            OR (reason = 'round' AND game_id IS NOT NULL AND hand_number IS NOT NULL
+                AND hand_number >= 1 AND period_start IS NULL AND amount = 1)
+            OR (reason = 'challenge' AND game_id IS NOT NULL AND hand_number IS NOT NULL
+                AND hand_number >= 1 AND period_start IS NULL AND amount = 1)
+        )
+    );
+    INSERT INTO score_events (
+        id, user_id, game_id, reason, hand_number, period_start, amount, created_at
+    )
+        SELECT id, user_id, game_id, reason, hand_number, NULL, amount, created_at
+        FROM score_events_old;
+    DROP TABLE score_events_old;
+
+    CREATE UNIQUE INDEX idx_score_legacy ON score_events(user_id) WHERE reason = 'legacy';
+    CREATE UNIQUE INDEX idx_score_round ON score_events(game_id, hand_number)
+        WHERE reason = 'round';
+    CREATE UNIQUE INDEX idx_score_challenge ON score_events(game_id, hand_number)
+        WHERE reason = 'challenge';
+    CREATE UNIQUE INDEX idx_score_login ON score_events(user_id, period_start)
+        WHERE reason = 'login';
+    CREATE INDEX idx_score_user ON score_events(user_id, id);
+    CREATE INDEX idx_score_created_at ON score_events(created_at);
+
+    CREATE TRIGGER score_event_updates_total AFTER INSERT ON score_events
+    BEGIN
+        UPDATE user_stats SET points_won = points_won + NEW.amount WHERE telegram_id = NEW.user_id;
+    END;
+    CREATE TRIGGER score_event_valid_player BEFORE INSERT ON score_events
+    WHEN NEW.game_id IS NOT NULL
+    BEGIN
+        SELECT CASE WHEN NOT EXISTS (
+            SELECT 1 FROM games g WHERE g.id = NEW.game_id
+                AND NEW.user_id IN (g.creator_id, g.player2_id)
+        ) THEN RAISE(ABORT, 'Score recipient is not a player') END;
+    END;
+    CREATE TRIGGER score_event_no_update BEFORE UPDATE ON score_events
+    BEGIN
+        SELECT RAISE(ABORT, 'Score events are immutable');
+    END;
+    CREATE TRIGGER score_event_no_delete BEFORE DELETE ON score_events
+    BEGIN
+        SELECT RAISE(ABORT, 'Score events are immutable');
+    END;
+
+    -- A database may have received users after the previous backfill migration.
+    INSERT INTO score_events (user_id, reason, amount, created_at)
+        SELECT telegram_id, 'legacy', points_won, unixepoch() FROM user_stats
+        WHERE points_won > 0 AND NOT EXISTS (
+            SELECT 1 FROM score_events s WHERE s.user_id = user_stats.telegram_id
+                AND s.reason = 'legacy'
+        );
+    UPDATE user_stats SET points_won = (
+        SELECT COALESCE(SUM(amount), 0) FROM score_events s
+        WHERE s.user_id = user_stats.telegram_id
+    );
+    """,
+    """
+    -- Direct truth-or-dare rounds already had an immutable score ledger, but
+    -- older versions did not copy approved challenge points into the game
+    -- snapshot used by the UI and winner calculation.
+    INSERT INTO score_events (user_id, reason, amount, created_at)
+        SELECT telegram_id, 'legacy', points_won, unixepoch() FROM user_stats
+        WHERE points_won > 0 AND NOT EXISTS (
+            SELECT 1 FROM score_events s WHERE s.user_id = user_stats.telegram_id
+                AND s.reason = 'legacy'
+        );
+    UPDATE user_stats SET points_won = (
+        SELECT COALESCE(SUM(amount), 0) FROM score_events s
+        WHERE s.user_id = user_stats.telegram_id
+    );
+
+    UPDATE games
+    SET player1_score = (
+            SELECT COUNT(*) FROM score_events s
+            WHERE s.game_id = games.id
+              AND s.reason = 'challenge'
+              AND s.user_id = games.creator_id
+        ),
+        player2_score = (
+            SELECT COUNT(*) FROM score_events s
+            WHERE s.game_id = games.id
+              AND s.reason = 'challenge'
+              AND s.user_id = games.player2_id
+        )
+    WHERE game_type = 'truth_or_dare';
+    """,
+    """
+    -- Some post-ledger upgrades treated the already-accounted score total as
+    -- an opening balance. Such rows are identifiable because their amount is
+    -- exactly the user's complete non-legacy ledger before that row.
+    -- Preserve an aggregate-only balance from a database that was already
+    -- marked as schema 16 but had not recorded any ledger rows.
+    INSERT INTO score_events (user_id, reason, amount, created_at)
+        SELECT telegram_id, 'legacy', points_won, unixepoch() FROM user_stats
+        WHERE points_won > 0 AND NOT EXISTS (
+            SELECT 1 FROM score_events s WHERE s.user_id = user_stats.telegram_id
+        );
+
+    DROP TRIGGER IF EXISTS score_event_no_delete;
+    DELETE FROM score_events
+    WHERE reason = 'legacy'
+      AND EXISTS (
+          SELECT 1 FROM score_events earlier
+          WHERE earlier.user_id = score_events.user_id
+            AND earlier.id < score_events.id
+            AND earlier.reason != 'legacy'
+      )
+      AND amount = (
+          SELECT COALESCE(SUM(earlier.amount), 0) FROM score_events earlier
+          WHERE earlier.user_id = score_events.user_id
+            AND earlier.id < score_events.id
+            AND earlier.reason != 'legacy'
+      );
+    CREATE TRIGGER score_event_no_delete BEFORE DELETE ON score_events
+    BEGIN
+        SELECT RAISE(ABORT, 'Score events are immutable');
+    END;
+    UPDATE user_stats SET points_won = (
+        SELECT COALESCE(SUM(amount), 0) FROM score_events s
+        WHERE s.user_id = user_stats.telegram_id
+    );
+
+    -- A rejected direct truth-or-dare answer can leave an odd-round match
+    -- tied. Older code incorrectly awarded every such match to player two.
+    UPDATE user_stats
+    SET wins = MAX(
+            wins - (
+                SELECT COUNT(*) FROM games g
+                WHERE g.game_type = 'truth_or_dare'
+                  AND g.status = 'finished'
+                  AND g.player1_score = g.player2_score
+                  AND g.winner_id = user_stats.telegram_id
+            ),
+            0
+        ),
+        losses = MAX(
+            losses - (
+                SELECT COUNT(*) FROM games g
+                WHERE g.game_type = 'truth_or_dare'
+                  AND g.status = 'finished'
+                  AND g.player1_score = g.player2_score
+                  AND g.loser_id = user_stats.telegram_id
+            ),
+            0
+        );
+    UPDATE games
+    SET winner_id = NULL, loser_id = NULL
+    WHERE game_type = 'truth_or_dare'
+      AND status = 'finished'
+      AND player1_score = player2_score;
+    """,
+    """
+    -- Add the persisted state for the turn-based word guessing game and
+    -- extend the original game_type CHECK without rebuilding game history.
+    INSERT INTO score_events (user_id, reason, amount, created_at)
+        SELECT telegram_id, 'legacy', points_won, unixepoch() FROM user_stats
+        WHERE points_won > 0 AND NOT EXISTS (
+            SELECT 1 FROM score_events s WHERE s.user_id = user_stats.telegram_id
+        );
+    UPDATE user_stats SET points_won = (
+        SELECT COALESCE(SUM(amount), 0) FROM score_events s
+        WHERE s.user_id = user_stats.telegram_id
+    );
+
+    PRAGMA writable_schema = ON;
+    UPDATE sqlite_master SET sql = replace(
+        sql,
+        'game_type IN (''gol_ya_pooch'', ''tic_tac_toe'', ''truth_or_dare'')',
+        'game_type IN (''gol_ya_pooch'', ''tic_tac_toe'', ''truth_or_dare'', ''word_guess'')'
+    ) WHERE type = 'table' AND name = 'games';
+    PRAGMA schema_version = 2000;
+    PRAGMA writable_schema = OFF;
+
+    ALTER TABLE games ADD COLUMN word_secret TEXT;
+    ALTER TABLE games ADD COLUMN word_attempts INTEGER NOT NULL DEFAULT 0
+        CHECK (word_attempts >= 0);
+    ALTER TABLE games ADD COLUMN word_guesses_json TEXT NOT NULL DEFAULT '[]';
+    """,
+    """
+    -- Every Telegram user gets a short, stable internal payment identifier.
+    -- Preserve aggregate-only scores from databases already marked as schema 18.
+    INSERT INTO score_events (user_id, reason, amount, created_at)
+        SELECT telegram_id, 'legacy', points_won, unixepoch() FROM user_stats
+        WHERE points_won > 0 AND NOT EXISTS (
+            SELECT 1 FROM score_events s WHERE s.user_id = user_stats.telegram_id
+        );
+    UPDATE user_stats SET points_won = (
+        SELECT COALESCE(SUM(amount), 0) FROM score_events s
+        WHERE s.user_id = user_stats.telegram_id
+    );
+
+    ALTER TABLE users ADD COLUMN id INTEGER;
+    UPDATE users
+    SET id = (
+        SELECT COUNT(*) FROM users AS earlier
+        WHERE earlier.rowid <= users.rowid
+    );
+    CREATE UNIQUE INDEX idx_users_internal_id ON users(id);
+
+    ALTER TABLE users ADD COLUMN is_activated INTEGER NOT NULL DEFAULT 0
+        CHECK (is_activated IN (0, 1));
+    ALTER TABLE users ADD COLUMN activation_approved_at INTEGER;
+    ALTER TABLE users ADD COLUMN activation_approved_by INTEGER;
+
+    CREATE TABLE payment_settings (
+        singleton_id INTEGER PRIMARY KEY CHECK (singleton_id = 1),
+        base_amount_toman INTEGER NOT NULL CHECK (base_amount_toman > 0),
+        card_number TEXT NOT NULL CHECK (length(trim(card_number)) BETWEEN 8 AND 32),
+        card_holder TEXT NOT NULL CHECK (length(trim(card_holder)) BETWEEN 2 AND 100),
+        updated_at INTEGER NOT NULL,
+        updated_by INTEGER
+    );
+    INSERT INTO payment_settings (
+        singleton_id, base_amount_toman, card_number, card_holder, updated_at
+    ) VALUES (1, 100000, '6219861814466156', 'محمد صادق کیومرثی', unixepoch());
+
+    CREATE TABLE payment_receipts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_telegram_id INTEGER NOT NULL REFERENCES users(telegram_id),
+        user_internal_id INTEGER NOT NULL,
+        expected_amount_toman INTEGER NOT NULL CHECK (expected_amount_toman > 0),
+        receipt_type TEXT NOT NULL CHECK (receipt_type IN ('text', 'photo')),
+        receipt_text TEXT,
+        telegram_file_id TEXT,
+        status TEXT NOT NULL DEFAULT 'pending'
+            CHECK (status IN ('pending', 'approved', 'rejected')),
+        submitted_at INTEGER NOT NULL,
+        reviewed_at INTEGER,
+        reviewed_by INTEGER,
+        CHECK (
+            (receipt_type = 'text' AND receipt_text IS NOT NULL AND telegram_file_id IS NULL)
+            OR
+            (receipt_type = 'photo' AND telegram_file_id IS NOT NULL)
+        )
+    );
+    CREATE INDEX idx_payment_receipts_user_status
+        ON payment_receipts(user_telegram_id, status, submitted_at DESC);
+    """,
+    """
+    -- Keep an invitation while a new user completes payment activation.
+    -- Preserve any aggregate-only score imported while schema 19 was current.
+    INSERT INTO score_events (user_id, reason, amount, created_at)
+        SELECT telegram_id, 'legacy', points_won, unixepoch() FROM user_stats
+        WHERE points_won > 0 AND NOT EXISTS (
+            SELECT 1 FROM score_events s WHERE s.user_id = user_stats.telegram_id
+        );
+    UPDATE user_stats SET points_won = (
+        SELECT COALESCE(SUM(amount), 0) FROM score_events s
+        WHERE s.user_id = user_stats.telegram_id
+    );
+    CREATE TEMP TABLE pending_user_ids (user_rowid INTEGER PRIMARY KEY, new_id INTEGER NOT NULL);
+    INSERT INTO pending_user_ids (user_rowid, new_id)
+        SELECT rowid,
+               (SELECT COALESCE(MAX(id), 0) FROM users)
+                   + ROW_NUMBER() OVER (ORDER BY rowid)
+        FROM users
+        WHERE id IS NULL;
+    UPDATE users
+    SET id = (SELECT new_id FROM pending_user_ids WHERE user_rowid = users.rowid)
+    WHERE id IS NULL;
+    DROP TABLE pending_user_ids;
+    ALTER TABLE users ADD COLUMN pending_invite_token TEXT;
+    """,
+    """
+    -- A stable in-bot name starts from the current Telegram display name and
+    -- stops following Telegram only after the user explicitly customizes it.
+    -- Preserve an aggregate-only score from a database already marked as
+    -- schema 20 but missing its score ledger.
+    INSERT INTO score_events (user_id, reason, amount, created_at)
+        SELECT telegram_id, 'legacy', points_won, unixepoch() FROM user_stats
+        WHERE points_won > 0 AND NOT EXISTS (
+            SELECT 1 FROM score_events s WHERE s.user_id = user_stats.telegram_id
+        );
+    UPDATE user_stats SET points_won = (
+        SELECT COALESCE(SUM(amount), 0) FROM score_events s
+        WHERE s.user_id = user_stats.telegram_id
+    );
+    CREATE TEMP TABLE nickname_pending_user_ids (
+        user_rowid INTEGER PRIMARY KEY,
+        new_id INTEGER NOT NULL
+    );
+    INSERT INTO nickname_pending_user_ids (user_rowid, new_id)
+        SELECT rowid,
+               (SELECT COALESCE(MAX(id), 0) FROM users)
+                   + ROW_NUMBER() OVER (ORDER BY rowid)
+        FROM users
+        WHERE id IS NULL;
+    UPDATE users
+    SET id = (
+        SELECT new_id FROM nickname_pending_user_ids
+        WHERE user_rowid = users.rowid
+    )
+    WHERE id IS NULL;
+    DROP TABLE nickname_pending_user_ids;
+
+    ALTER TABLE users ADD COLUMN nickname TEXT
+        CHECK (nickname IS NULL OR length(trim(nickname)) BETWEEN 1 AND 40);
+    ALTER TABLE users ADD COLUMN nickname_is_custom INTEGER NOT NULL DEFAULT 0
+        CHECK (nickname_is_custom IN (0, 1));
+    UPDATE users SET nickname = display_name WHERE nickname IS NULL;
+    """,
+)

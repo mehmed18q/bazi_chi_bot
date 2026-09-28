@@ -1,0 +1,45 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "bazi_chi_bot"
+version = "0.1.0"
+description = "A persistent two-player Telegram Bazi Chi game bot"
+readme = "README.md"
+requires-python = ">=3.14"
+license = { text = "MIT" }
+authors = [{ name = "Sadegh" }]
+dependencies = [
+  "aiogram>=3.20,<4",
+  "aiohttp-socks>=0.10,<1",
+  "aiosqlite>=0.21,<1",
+  "pydantic-settings>=2.10,<3",
+]
+
+[project.optional-dependencies]
+outreach = [
+  "openpyxl>=3.1,<4",
+  "telethon>=1.45,<2",
+]
+test = [
+  "pytest>=8.4,<10",
+  "pytest-asyncio>=1.0,<2",
+  "ruff>=0.15,<1",
+]
+
+[project.scripts]
+bazi_chi_bot = "bazi_chi_bot.__main__:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/bazi_chi_bot"]
+
+[tool.pytest.ini_options]
+addopts = "-ra"
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py314"
+line-length = 100
+src = ["src", "tests"]
