@@ -12,6 +12,11 @@ from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramAPIError, TelegramNetworkError
 from aiogram.types import BotCommand, BotCommandScopeChat, User
+from aiohttp_socks import (
+    ProxyConnectionError as AiohttpSocksProxyConnectionError,
+    ProxyError as AiohttpSocksProxyError,
+    ProxyTimeoutError as AiohttpSocksProxyTimeoutError,
+)
 
 from .config import Settings
 from .countdown import (
@@ -28,6 +33,16 @@ from .telegram.sponsors import deactivate_invalid_sponsors
 logger = logging.getLogger(__name__)
 
 RECONNECT_INTERVAL_SECONDS = 10 * 60
+
+# aiohttp-socks exposes timeout and connection failures as separate exception
+# classes which are not subclasses of TelegramNetworkError (and, in the
+# current release, are not subclasses of one another either).  Treat all of
+# them as a failed candidate during startup so the next proxy can be tried.
+PROXY_CONNECTION_ERRORS = (
+    AiohttpSocksProxyConnectionError,
+    AiohttpSocksProxyError,
+    AiohttpSocksProxyTimeoutError,
+)
 
 
 @dataclass(slots=True)
@@ -70,11 +85,16 @@ async def _connect_to_telegram(settings: Settings) -> TelegramConnection | None:
             continue
         try:
             user = await bot.get_me()
-        except TelegramNetworkError:
+        except (TelegramNetworkError, *PROXY_CONNECTION_ERRORS, TimeoutError, OSError) as error:
             if proxy_url is None:
-                logger.warning("Direct Telegram connection is unavailable")
+                logger.warning("Direct Telegram connection is unavailable: %s", error)
             else:
-                logger.warning("Telegram proxy %s/%s is unavailable", index, len(candidates))
+                logger.warning(
+                    "Telegram proxy %s/%s is unavailable: %s",
+                    index,
+                    len(candidates),
+                    error,
+                )
             await bot.session.close()
             continue
 

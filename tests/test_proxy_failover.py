@@ -3,6 +3,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import pytest
+from aiohttp_socks import ProxyTimeoutError
 from aiogram.exceptions import TelegramNetworkError
 from aiogram.methods import GetMe
 
@@ -69,6 +70,29 @@ async def test_connection_tries_proxies_in_order_until_one_works(monkeypatch):
         "http://second:7890",
     ]
     unavailable.session.close.assert_awaited_once()
+    available.session.close.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_proxy_timeout_fails_over_to_the_next_proxy(monkeypatch):
+    timed_out = fake_bot(error=ProxyTimeoutError("proxy timed out"))
+    user = SimpleNamespace(id=42, username="test_bot")
+    available = fake_bot(user=user)
+    build_bot = Mock(side_effect=[timed_out, available])
+
+    def build(settings: Settings, proxy_url: str | None) -> object:
+        del settings
+        return build_bot(proxy_url)
+
+    monkeypatch.setattr(app, "_build_bot", build)
+    settings = make_settings(telegram_proxy_urls=["http://first:10808", "http://second:10808"])
+
+    connection = await app._connect_to_telegram(settings)
+
+    assert connection is not None
+    assert connection.bot is available
+    assert connection.proxy_number == 2
+    timed_out.session.close.assert_awaited_once()
     available.session.close.assert_not_awaited()
 
 
