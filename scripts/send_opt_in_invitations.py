@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Send invitations to the project's fully opted-in, deduplicated contact workbook.
+"""Send invitations to the project's fully opted-in contact workbook.
 
 The input workbook is intentionally fixed. It is read in streaming mode and never
-modified. Per-contact delivery state is kept in SQLite so a multi-million-row XLSX
-does not have to be loaded and rewritten after every Telegram request.
+modified. A single sheet and a bounded number of records can be selected for each
+run. Per-contact delivery state is kept in SQLite so a multi-million-row XLSX does
+not have to be loaded and rewritten after every Telegram request.
 """
 
 import argparse
@@ -20,7 +21,7 @@ from urllib.parse import urlparse
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-INPUT_WORKBOOK = PROJECT_ROOT / "phones" / "all_phones_deduplicated.xlsx"
+INPUT_WORKBOOK = PROJECT_ROOT / "phones" / "all_phones.xlsx"
 DEFAULT_STATE_DB = PROJECT_ROOT / "data" / "outreach" / "invitations.sqlite3"
 
 # The owner of this list has explicitly confirmed that every contact opted in.
@@ -65,6 +66,20 @@ class PreparedContact:
     @property
     def record_key(self) -> str:
         return self.phone
+
+
+@dataclass(frozen=True, slots=True)
+class DeliveryReport:
+    """Cumulative delivery report for the selected workbook scope."""
+
+    total_users: int
+    sent: int
+    failed_by_reason: dict[str, int]
+    remaining: int
+
+    @property
+    def failed(self) -> int:
+        return sum(self.failed_by_reason.values())
 
 
 def clean_text(value: object) -> str:
@@ -185,7 +200,7 @@ def safe_error(error: BaseException, limit: int = 140) -> str:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "ارسال دعوت بازی‌چی به فهرست ثابت all_phones_deduplicated.xlsx؛ "
+            "ارسال دعوت بازی‌چی به فهرست ثابت all_phones.xlsx؛ "
             "همهٔ مخاطبان این فایل رضایت داده‌اند"
         )
     )
@@ -211,6 +226,23 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=Path(os.getenv("OUTREACH_STATE_DB", str(DEFAULT_STATE_DB))),
         help="SQLite وضعیت ارسال، لغو و خطاها",
+    )
+    parser.add_argument(
+        "--sheet",
+        "--sheet-name",
+        dest="sheet_name",
+        default=os.getenv("OUTREACH_SHEET"),
+        help="فقط همین شیت را پردازش کن؛ نام شیت اکسل",
+    )
+    parser.add_argument(
+        "--count",
+        type=int,
+        default=(
+            int(os.environ["OUTREACH_COUNT"])
+            if os.getenv("OUTREACH_COUNT")
+            else None
+        ),
+        help="حداکثر تعداد رکوردی که از شیت انتخابی پردازش می‌شود",
     )
     parser.add_argument(
         "--bot-link", default=os.getenv("OUTREACH_BOT_LINK"), help="مثل https://t.me/MyBot"
@@ -244,6 +276,12 @@ def validate_args(args: argparse.Namespace) -> None:
     if not args.bot_link:
         raise ValueError("--bot-link یا OUTREACH_BOT_LINK الزامی است")
     args.bot_link = validate_bot_link(args.bot_link)
+    if getattr(args, "count", None) is not None and args.count < 1:
+        raise ValueError("count باید عددی بزرگ‌تر از صفر باشد")
+    if getattr(args, "sheet_name", None) is not None:
+        args.sheet_name = clean_text(args.sheet_name)
+        if not args.sheet_name:
+            raise ValueError("نام شیت نمی‌تواند خالی باشد")
     normalize_country_code(args.default_country_code)
     if args.delay < 30:
         raise ValueError("فاصلهٔ ارسال باید حداقل ۳۰ ثانیه باشد")
@@ -289,6 +327,12 @@ def open_state_database(path: Path | str) -> sqlite3.Connection:
     )
     connection.execute(
         "CREATE INDEX IF NOT EXISTS idx_invitation_status_sent_at ON invitation_status(sent_at)"
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_invitation_status_sheet_row
+        ON invitation_status(sheet_name, row_number)
+        """
     )
     connection.commit()
     return connection
@@ -354,11 +398,120 @@ def sent_count_today(connection: sqlite3.Connection, today: str) -> int:
     )
 
 
-def iter_excel_contacts(load_workbook: Any) -> Iterator[ExcelContact]:
+def status_reason(status: object) -> str:
+    """Return the stable status category without its timestamp/details."""
+    value = clean_text(status)
+    return value.split("|", 1)[0].strip() or "UNKNOWN"
+
+
+def summarize_delivery(
+    load_workbook: Any,
+    connection: sqlite3.Connection,
+    *,
+    selected_sheet: str | None,
+    limit: int | None,
+) -> DeliveryReport:
+    """Summarize the selected rows using the latest persisted status per contact.
+
+    The workbook is streamed a second time only for the report. This keeps memory
+    bounded even for the million-row segment sheets and makes the report include
+    contacts that were not reached because of the daily limit or a stopped run.
+    """
+    scope: dict[str, int] = {}
+    # When a bounded run is requested, retain exact physical row numbers so a
+    # later report cannot accidentally include a previously processed row past
+    # the current limit (blank phone rows can make row numbers non-contiguous).
+    scope_rows: dict[str, set[int]] | None = {} if limit is not None else None
+    total_users = 0
+    for contact in iter_excel_contacts(
+        load_workbook, selected_sheet=selected_sheet, limit=limit
+    ):
+        total_users += 1
+        scope[contact.sheet_name] = max(scope.get(contact.sheet_name, 0), contact.row_number)
+        if scope_rows is not None:
+            scope_rows.setdefault(contact.sheet_name, set()).add(contact.row_number)
+
+    status_counts: dict[str, int] = {}
+    for sheet_name, last_row in scope.items():
+        if scope_rows is None:
+            rows = connection.execute(
+                """
+                SELECT status, COUNT(*)
+                FROM invitation_status
+                WHERE sheet_name = ? AND row_number <= ?
+                GROUP BY status
+                """,
+                (sheet_name, last_row),
+            ).fetchall()
+            for status, count in rows:
+                reason = status_reason(status)
+                status_counts[reason] = status_counts.get(reason, 0) + int(count)
+        else:
+            rows = connection.execute(
+                """
+                SELECT row_number, status
+                FROM invitation_status
+                WHERE sheet_name = ? AND row_number <= ?
+                """,
+                (sheet_name, last_row),
+            ).fetchall()
+            allowed_rows = scope_rows[sheet_name]
+            for row_number, status in rows:
+                if row_number not in allowed_rows:
+                    continue
+                reason = status_reason(status)
+                status_counts[reason] = status_counts.get(reason, 0) + 1
+
+    sent = sum(count for reason, count in status_counts.items() if reason == "SENT")
+    failed_by_reason = {
+        reason: count
+        for reason, count in sorted(status_counts.items())
+        if reason != "SENT"
+    }
+    failed = sum(failed_by_reason.values())
+    return DeliveryReport(
+        total_users=total_users,
+        sent=sent,
+        failed_by_reason=failed_by_reason,
+        remaining=max(0, total_users - sent - failed),
+    )
+
+
+def print_delivery_report(
+    report: DeliveryReport,
+    *,
+    selected_sheet: str | None,
+    limit: int | None,
+) -> None:
+    scope = selected_sheet or "همهٔ شیت‌ها"
+    bound = f"؛ سقف انتخابی: {limit}" if limit is not None else ""
+    print(f"\nگزارش ارسال | شیت: {scope}{bound}")
+    print(f"کل کاربران در محدوده: {report.total_users}")
+    print(f"ارسال موفق: {report.sent}")
+    print(f"ارسال ناموفق: {report.failed}")
+    if report.failed_by_reason:
+        for reason, count in report.failed_by_reason.items():
+            print(f"  - {reason}: {count}")
+    else:
+        print("  - بدون خطا")
+    print(f"باقی‌مانده و ارسال‌نشده: {report.remaining}")
+
+
+def iter_excel_contacts(
+    load_workbook: Any,
+    *,
+    selected_sheet: str | None = None,
+    limit: int | None = None,
+) -> Iterator[ExcelContact]:
     workbook = load_workbook(INPUT_WORKBOOK, read_only=True, data_only=True)
     sequence = 0
+    selected_sheet_found = False
+    selected_records = 0
     try:
         for worksheet in workbook.worksheets:
+            if selected_sheet is not None and worksheet.title != selected_sheet:
+                continue
+            selected_sheet_found = True
             rows = worksheet.iter_rows(values_only=True)
             header = next(rows, None)
             if not header:
@@ -376,7 +529,10 @@ def iter_excel_contacts(load_workbook: Any) -> Iterator[ExcelContact]:
                 raw_phone = row[phone_column] if phone_column < len(row) else None
                 if raw_phone in (None, ""):
                     continue
+                if limit is not None and selected_records >= limit:
+                    break
                 sequence += 1
+                selected_records += 1
                 name = clean_text(row[name_column] if name_column < len(row) else None)
                 source = clean_text(
                     row[source_column]
@@ -391,6 +547,10 @@ def iter_excel_contacts(load_workbook: Any) -> Iterator[ExcelContact]:
                     raw_phone=raw_phone,
                     source=source,
                 )
+            if selected_sheet is not None:
+                break
+        if selected_sheet is not None and not selected_sheet_found:
+            raise ValueError(f"شیت {selected_sheet!r} در فایل اکسل پیدا نشد")
     finally:
         workbook.close()
 
@@ -435,10 +595,16 @@ async def run(args: argparse.Namespace) -> int:
     validate_args(args)
     load_workbook, TelegramClient, errors, contact_types = load_dependencies()
     ImportContactsRequest, InputPhoneContact = contact_types
+    selected_sheet = getattr(args, "sheet_name", None)
+    selected_count = getattr(args, "count", None)
 
     state_path: Path | str = ":memory:" if args.dry_run else args.state_db
     state = open_state_database(state_path)
-    contacts = iter_excel_contacts(load_workbook)
+    contacts = iter_excel_contacts(
+        load_workbook,
+        selected_sheet=selected_sheet,
+        limit=selected_count,
+    )
     ready = iter_ready_contacts(
         contacts,
         state,
@@ -461,6 +627,18 @@ async def run(args: argparse.Namespace) -> int:
                     f"{mask_phone(contact.phone)} / source={contact.source or '-'} ---"
                 )
                 print(create_message(contact.name, args.bot_link))
+            ready.close()
+            contacts.close()
+            print_delivery_report(
+                summarize_delivery(
+                    load_workbook,
+                    state,
+                    selected_sheet=selected_sheet,
+                    limit=selected_count,
+                ),
+                selected_sheet=selected_sheet,
+                limit=selected_count,
+            )
             return 0
         finally:
             ready.close()
@@ -473,14 +651,40 @@ async def run(args: argparse.Namespace) -> int:
         print(f"سقف امروز قبلاً پر شده است: {sent_count}/{args.max_per_day}")
         ready.close()
         contacts.close()
+        print_delivery_report(
+            summarize_delivery(
+                load_workbook,
+                state,
+                selected_sheet=selected_sheet,
+                limit=selected_count,
+            ),
+            selected_sheet=selected_sheet,
+            limit=selected_count,
+        )
         state.close()
         return 0
 
-    first_contact = next(ready, None)
+    try:
+        first_contact = next(ready, None)
+    except BaseException:
+        ready.close()
+        contacts.close()
+        state.close()
+        raise
     if first_contact is None:
         print("هیچ مخاطب تازه‌ای برای بررسی باقی نمانده است.")
         ready.close()
         contacts.close()
+        print_delivery_report(
+            summarize_delivery(
+                load_workbook,
+                state,
+                selected_sheet=selected_sheet,
+                limit=selected_count,
+            ),
+            selected_sheet=selected_sheet,
+            limit=selected_count,
+        )
         state.close()
         return 0
 
@@ -494,6 +698,7 @@ async def run(args: argparse.Namespace) -> int:
     )
     consecutive_errors = 0
     current: PreparedContact | None = first_contact
+    report: DeliveryReport | None = None
     try:
         if args.phone:
             await client.start(phone=args.phone)
@@ -629,9 +834,17 @@ async def run(args: argparse.Namespace) -> int:
         await client.disconnect()
         ready.close()
         contacts.close()
+        report = summarize_delivery(
+            load_workbook,
+            state,
+            selected_sheet=selected_sheet,
+            limit=selected_count,
+        )
         state.close()
 
     print(f"State database: {args.state_db}; sent_today={sent_count}/{args.max_per_day}")
+    assert report is not None
+    print_delivery_report(report, selected_sheet=selected_sheet, limit=selected_count)
     return 0
 
 

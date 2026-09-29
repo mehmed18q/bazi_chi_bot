@@ -4,7 +4,16 @@ import json
 
 import aiosqlite
 
-from ..models import FinalChoice, Game, GamePhase, GameStatus, GameType, User, WordGuess
+from ..models import (
+    FinalChoice,
+    Game,
+    GamePhase,
+    GameStatus,
+    GameType,
+    MastermindGuess,
+    User,
+    WordGuess,
+)
 
 
 def _game_from_row(row: aiosqlite.Row) -> Game:
@@ -59,6 +68,17 @@ def _game_from_row(row: aiosqlite.Row) -> Game:
             WordGuess(item["text"], item["feedback"])
             for item in json.loads(row["word_guesses_json"])
         ),
+        mastermind_secret=(
+            tuple(json.loads(row["mastermind_secret_json"]))
+            if row["mastermind_secret_json"]
+            else None
+        ),
+        mastermind_attempts=row["mastermind_attempts"],
+        mastermind_guesses=tuple(
+            MastermindGuess(tuple(item["colors"]), item["black"], item["white"])
+            for item in json.loads(row["mastermind_guesses_json"])
+        ),
+        mastermind_draft=tuple(json.loads(row["mastermind_draft_json"])),
     )
 
 

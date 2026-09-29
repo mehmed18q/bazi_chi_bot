@@ -53,7 +53,7 @@ def test_all_contacts_have_consent_and_terminal_statuses_are_recognized():
 
 async def test_run_reads_all_sheets_and_persists_results_in_sqlite(tmp_path, monkeypatch):
     script = load_script()
-    input_path = tmp_path / "all_phones_deduplicated.xlsx"
+    input_path = tmp_path / "all_phones.xlsx"
     workbook = Workbook()
     first = workbook.active
     first.title = "phones_1"

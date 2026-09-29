@@ -8,6 +8,7 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from ..models import Game, GamePhase, GameStatus, GameType, User
+from ..rules import MASTERMIND_COLOR_EMOJIS, MASTERMIND_COLORS
 
 
 def menu_keyboard(
@@ -15,6 +16,7 @@ def menu_keyboard(
 ) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(text="🎮 شروع بازی", callback_data="menu:new")
+    builder.button(text="🎯 چالش روزانه", callback_data="menu:daily_challenge")
     builder.button(text="📊 آمار من", callback_data="menu:stats")
     builder.button(text="👤 نام نمایشی", callback_data="menu:profile")
     if has_active_games:
@@ -23,9 +25,10 @@ def menu_keyboard(
     builder.button(text="🏅 برترین‌ها در همهٔ دوره‌ها", callback_data="menu:leaderboard:all_time")
     builder.button(text="🏁 آخرین نتیجه", callback_data="menu:last")
     builder.button(text="❔ راهنما", callback_data="menu:help")
+    builder.button(text="🛟 پشتیبانی", callback_data="menu:support")
     if is_countdown_admin:
         builder.button(text="⚙️ مدیریت ربات", callback_data="menu:admin")
-    builder.adjust(2, 1 if has_active_games else 2, 2, 2, 2, 1)
+    builder.adjust(2, 2, 1 if has_active_games else 2, 2, 2, 2, 1)
     return builder.as_markup()
 
 
@@ -191,10 +194,11 @@ def game_types_keyboard() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(text="🌸 گل یا پوچ", callback_data="setup:type:gol")
     builder.button(text="❌⭕ دوز سه‌تایی", callback_data="setup:type:ttt")
-    builder.button(text="🎭 جرئت یا حقیقت", callback_data="setup:type:tod")
     builder.button(text="🔤 حدس کلمه", callback_data="setup:type:word")
+    builder.button(text="🎨 فکر بکر", callback_data="setup:type:mastermind")
+    builder.button(text="🎭 جرئت یا حقیقت", callback_data="setup:type:tod")
     builder.button(text="🏠 منوی اصلی", callback_data="menu:home")
-    builder.adjust(2, 2, 1)
+    builder.adjust(2, 2, 1, 1)
     return builder.as_markup()
 
 
@@ -222,13 +226,21 @@ def hands_keyboard(fists: int, game_type: GameType = GameType.GOL_YA_POOCH) -> I
                 f"setup:tod:{hands}"
                 if game_type is GameType.TRUTH_OR_DARE
                 else (
-                    f"setup:word:{hands}"
-                    if game_type is GameType.WORD_GUESS
-                    else f"setup:h:{fists}:{hands}"
+                    f"setup:mastermind:{hands}"
+                    if game_type is GameType.MASTERMIND
+                    else (
+                        f"setup:word:{hands}"
+                        if game_type is GameType.WORD_GUESS
+                        else f"setup:h:{fists}:{hands}"
+                    )
                 )
             )
         )
-        unit = "دور" if game_type in {GameType.TRUTH_OR_DARE, GameType.WORD_GUESS} else "دست"
+        unit = (
+            "دور"
+            if game_type in {GameType.TRUTH_OR_DARE, GameType.WORD_GUESS, GameType.MASTERMIND}
+            else "دست"
+        )
         builder.button(text=f"{hands} {unit}", callback_data=callback)
     builder.button(text="↩️ تغییر بازی", callback_data="menu:new")
     builder.adjust(2, 2, 1)
@@ -250,7 +262,11 @@ def game_keyboard(
                     else (
                         "بیا با هم حدس کلمه بازی کنیم! 🔤"
                         if game.game_type is GameType.WORD_GUESS
-                        else "بیا با هم گل یا پوچ بازی کنیم! 🌸"
+                        else (
+                            "بیا با هم فکر بکر بازی کنیم! 🎨"
+                            if game.game_type is GameType.MASTERMIND
+                            else "بیا با هم گل یا پوچ بازی کنیم! 🌸"
+                        )
                     )
                 )
             )
@@ -276,6 +292,29 @@ def game_keyboard(
                 callback_data=f"game:{game.id}:{game.version}:move:{cell}",
             )
         builder.adjust(3)
+        return builder.as_markup()
+
+    if (
+        game.game_type is GameType.MASTERMIND
+        and game.status is GameStatus.ACTIVE
+        and (
+            (game.phase is GamePhase.HIDING and game.hider_id == user_id)
+            or (game.phase is GamePhase.GUESSING and game.guesser_id == user_id)
+        )
+    ):
+        for color in MASTERMIND_COLORS:
+            builder.button(
+                text=MASTERMIND_COLOR_EMOJIS[color],
+                callback_data=f"game:{game.id}:{game.version}:mastermind:{color}",
+            )
+        if game.mastermind_draft:
+            builder.button(
+                text="↩️ پاک‌کردن انتخاب",
+                callback_data=f"game:{game.id}:{game.version}:mastermind:reset",
+            )
+            builder.adjust(3, 3, 1)
+        else:
+            builder.adjust(3, 3)
         return builder.as_markup()
 
     if (

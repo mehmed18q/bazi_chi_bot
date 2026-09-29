@@ -17,7 +17,9 @@ from .telegram.keyboards import question_kind_keyboard as question_kind_keyboard
 from .telegram.rendering import render_game as render_game
 from .telegram.rendering import stats_text as stats_text
 from .telegram.rendering import word_guess_board as word_guess_board
+from .telegram.rendering import mastermind_board as mastermind_board
 from .telegram.texts import FINAL_LABELS as FINAL_LABELS
 from .telegram.texts import HELP_TEXT as HELP_TEXT
 from .telegram.texts import START_TEXT as START_TEXT
+from .telegram.texts import SUPPORT_TEXT as SUPPORT_TEXT
 from .telegram.texts import TRUTH_OR_DARE_RULE as TRUTH_OR_DARE_RULE

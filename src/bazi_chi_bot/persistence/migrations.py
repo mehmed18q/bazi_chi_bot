@@ -693,4 +693,26 @@ MIGRATIONS: tuple[str, ...] = (
         CHECK (nickname_is_custom IN (0, 1));
     UPDATE users SET nickname = display_name WHERE nickname IS NULL;
     """,
+    """
+    -- Persist the color-code game without changing existing matches.
+    PRAGMA writable_schema = ON;
+    UPDATE sqlite_master SET sql = replace(
+        sql,
+        'game_type IN (''gol_ya_pooch'', ''tic_tac_toe'', ''truth_or_dare'', ''word_guess'')',
+        'game_type IN (''gol_ya_pooch'', ''tic_tac_toe'', ''truth_or_dare'', ''word_guess'', ''mastermind'')'
+    ) WHERE type = 'table' AND name = 'games';
+    UPDATE sqlite_master SET sql = replace(
+        sql,
+        'fists BETWEEN 2 AND 6',
+        '(fists BETWEEN 2 AND 6 OR fists = 8)'
+    ) WHERE type = 'table' AND name = 'games';
+    PRAGMA schema_version = 2100;
+    PRAGMA writable_schema = OFF;
+
+    ALTER TABLE games ADD COLUMN mastermind_secret_json TEXT;
+    ALTER TABLE games ADD COLUMN mastermind_attempts INTEGER NOT NULL DEFAULT 0
+        CHECK (mastermind_attempts >= 0);
+    ALTER TABLE games ADD COLUMN mastermind_guesses_json TEXT NOT NULL DEFAULT '[]';
+    ALTER TABLE games ADD COLUMN mastermind_draft_json TEXT NOT NULL DEFAULT '[]';
+    """,
 )

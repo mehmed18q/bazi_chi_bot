@@ -28,6 +28,7 @@ from .shared import (
     game_names,
     notify_turn,
     round_result_text,
+    mastermind_round_result_text,
     safe_edit,
     telegram_user,
 )
@@ -47,7 +48,7 @@ def register_handlers(
         await safe_edit(
             callback,
             "🎮 <b>کدام بازی را شروع می‌کنیم؟</b>\n\n"
-            "🌸 گل یا پوچ، ❌⭕ دوز سه‌تایی، 🎭 جرئت یا حقیقت یا 🔤 حدس کلمه؟",
+            "🌸 گل یا پوچ، ❌⭕ دوز سه‌تایی، 🔤 حدس کلمه، 🎨 فکر بکر یا 🎭 جرئت یا حقیقت؟",
             game_types_keyboard(),
         )
         await callback.answer()
@@ -97,6 +98,32 @@ def register_handlers(
             hands_keyboard(2, GameType.WORD_GUESS),
         )
         await callback.answer()
+
+    @router.callback_query(F.data == "setup:type:mastermind")
+    async def setup_mastermind(callback: CallbackQuery) -> None:
+        await safe_edit(
+            callback,
+            "🎨 <b>فکر بکر</b>\n\n"
+            "کد مخفی چهاررنگ را با آبی، زرد، مشکی، سفید، قرمز و سبز بساز؛ "
+            "مهره‌های سیاه و سفید راهنمایی‌ات می‌کنند.\n"
+            "در هر دور دقیقاً ۸ فرصت حدس داری. چند دور بازی کنیم؟",
+            hands_keyboard(8, GameType.MASTERMIND),
+        )
+        await callback.answer()
+
+    @router.callback_query(F.data.startswith("setup:mastermind:"))
+    async def create_mastermind(callback: CallbackQuery, bot: Bot) -> None:
+        try:
+            rounds = int((callback.data or "").rsplit(":", 1)[1])
+            await service.save_user(telegram_user(callback.from_user))
+            game = await service.create_game(
+                callback.from_user.id, 8, rounds, GameType.MASTERMIND
+            )
+        except ValueError, GameError:
+            await callback.answer("تنظیمات بازی درست نیست.", show_alert=True)
+            return
+        await edit_game_view(callback, bot, game, "✅ <b>بازی آماده شد!</b>")
+        await callback.answer("لینک دعوت آماده‌ست 📨")
 
     @router.callback_query(F.data.startswith("setup:word:"))
     async def create_word_guess(callback: CallbackQuery, bot: Bot) -> None:
@@ -236,6 +263,48 @@ def register_handlers(
                         result.game.loser_id,
                         "🔔 بازی تمام شد؛ نوبت توست جرئت یا حقیقت را انتخاب کنی!",
                     )
+            elif action == "mastermind":
+                if value == "reset":
+                    game = await service.reset_mastermind_selection(
+                        game_id, callback.from_user.id, version
+                    )
+                    await edit_game_view(callback, bot, game, "انتخاب‌ها پاک شد.")
+                else:
+                    selection = await service.select_mastermind_color(
+                        game_id, callback.from_user.id, value, version
+                    )
+                    game = selection.game
+                    if not selection.complete:
+                        await edit_game_view(callback, bot, game)
+                    elif selection.result is None:
+                        await edit_game_view(callback, bot, game, "✅ کد مخفی ثبت شد.")
+                        if game.guesser_id is not None:
+                            await send_game_view(
+                                bot, game, game.guesser_id, "🎨 کد آماده شد؛ حالا رنگ‌ها را حدس بزن!"
+                            )
+                            await notify_turn(
+                                bot, game.guesser_id, "🔔 نوبت توست کد چهاررنگ را حدس بزنی!"
+                            )
+                    else:
+                        result = selection.result
+                        names = await game_names(service, result.game)
+                        prefix = mastermind_round_result_text(result, names)
+                        await edit_game_view(callback, bot, result.game, prefix)
+                        opponent_id = result.game.opponent_of(callback.from_user.id)
+                        if opponent_id is not None:
+                            await send_game_view(bot, result.game, opponent_id, prefix)
+                        if result.match_finished and result.game.loser_id is not None:
+                            await notify_turn(
+                                bot,
+                                result.game.loser_id,
+                                "🔔 بازی تمام شد؛ نوبت توست جرئت یا حقیقت را انتخاب کنی!",
+                            )
+                        elif result.round_finished and result.game.hider_id is not None:
+                            await notify_turn(
+                                bot,
+                                result.game.hider_id,
+                                "🔔 دور تازه شروع شد؛ نوبت توست کد مخفی را بسازی!",
+                            )
             elif action == "final":
                 game = await service.choose_final(game_id, callback.from_user.id, value, version)
                 label = final_choice_label(game)

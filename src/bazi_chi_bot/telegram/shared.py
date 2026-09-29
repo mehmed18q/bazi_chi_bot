@@ -31,12 +31,14 @@ from ..game import (
     RepeatedQuestion,
     StaleAction,
 )
-from ..models import Game, TurnResult, User, WordGuessResult
+from ..models import Game, MastermindGuessResult, TurnResult, User, WordGuessResult
+from ..rules import MASTERMIND_COLOR_EMOJIS
 from ..ui import (
     FINAL_LABELS,
     game_keyboard,
     render_game,
     word_guess_board,
+    mastermind_board,
 )
 
 logger = logging.getLogger(__name__)
@@ -232,6 +234,26 @@ def word_round_result_text(result: WordGuessResult, names: dict[int, str]) -> st
         f"{outcome}\n"
         f"🔐 کلمه: <b>{escape(result.secret)}</b>\n"
         f"⭐ امتیاز این دور برای <b>{point_winner}</b>\n\n"
+        f"{board}"
+    )
+
+
+def mastermind_round_result_text(result: MastermindGuessResult, names: dict[int, str]) -> str:
+    board = mastermind_board(result.guesses)
+    if not result.round_finished:
+        return f"🎨 <b>نتیجهٔ حدس:</b> ⚫ {result.black} | ⚪ {result.white}\n\n{board}"
+    point_winner = escape(names.get(result.point_winner_id, "بازیکن"))
+    outcome = (
+        "🎯 <b>کد را درست حدس زدی!</b>"
+        if result.guessed_correctly
+        else "⌛ <b>تلاش‌های این دور تمام شد.</b>"
+    )
+    secret = " ".join(MASTERMIND_COLOR_EMOJIS.get(color, "⚪") for color in result.secret)
+    return (
+        f"{outcome}\n"
+        f"🔐 کد مخفی: <b>{secret}</b>\n"
+        f"⭐ امتیاز این دور برای <b>{point_winner}</b>\n"
+        f"⚫ مهرهٔ سیاه: <b>{result.black}</b> | ⚪ مهرهٔ سفید: <b>{result.white}</b>\n\n"
         f"{board}"
     )
 

@@ -28,6 +28,8 @@ from .models import (
     GameType,
     LeaderboardEntry,
     MoveResult,
+    MastermindGuessResult,
+    MastermindSelection,
     PaymentReceipt,
     PaymentSettings,
     Stats,
@@ -211,6 +213,30 @@ class GameService:
 
     async def guess_word(self, game_id: int, user_id: int, text: str) -> WordGuessResult:
         return await self.matches.guess_word(game_id, user_id, text)
+
+    async def choose_mastermind_code(
+        self, game_id: int, user_id: int, colors: Sequence[str] | str
+    ) -> Game:
+        return await self.matches.choose_mastermind_code(game_id, user_id, colors)
+
+    async def guess_mastermind(
+        self,
+        game_id: int,
+        user_id: int,
+        colors: Sequence[str] | str,
+        expected_version: int | None = None,
+    ) -> MastermindGuessResult:
+        return await self.matches.guess_mastermind(game_id, user_id, colors, expected_version)
+
+    async def select_mastermind_color(
+        self, game_id: int, user_id: int, color: str, expected_version: int
+    ) -> MastermindSelection:
+        return await self.matches.select_mastermind_color(game_id, user_id, color, expected_version)
+
+    async def reset_mastermind_selection(
+        self, game_id: int, user_id: int, expected_version: int
+    ) -> Game:
+        return await self.matches.reset_mastermind_selection(game_id, user_id, expected_version)
 
     async def pending_final_prompt(self, user_id: int) -> Game | None:
         return await self.challenges.pending_final_prompt(user_id)

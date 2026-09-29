@@ -24,6 +24,9 @@ from ..models import (
     GamePhase,
     GameStatus,
     GameType,
+    MastermindGuess,
+    MastermindGuessResult,
+    MastermindSelection,
     MoveResult,
     TurnResult,
     WordGuess,
@@ -35,9 +38,14 @@ from ..persistence.scores import award_point, record_match_result
 from ..rules import (
     ALLOWED_FISTS,
     ALLOWED_HAND_COUNTS,
+    MASTERMIND_COLORS,
+    MASTERMIND_LENGTH,
+    MASTERMIND_MAX_ATTEMPTS,
     _require_player,
     _require_version,
     evaluate_word_guess,
+    evaluate_mastermind_guess,
+    normalize_mastermind_code,
     normalize_word,
     play_tic_tac_toe,
 )
@@ -63,7 +71,12 @@ class MatchService:
             game_type = GameType(game_type)
         except ValueError as error:
             raise InvalidGameSetup from error
-        if fists not in ALLOWED_FISTS or total_hands not in ALLOWED_HAND_COUNTS:
+        valid_fists = (
+            fists in ALLOWED_FISTS or fists == MASTERMIND_MAX_ATTEMPTS
+            if game_type is GameType.MASTERMIND
+            else fists in ALLOWED_FISTS
+        )
+        if not valid_fists or total_hands not in ALLOWED_HAND_COUNTS:
             raise InvalidGameSetup
         now = int(time.time())
         async with self.database.transaction() as connection:
@@ -434,6 +447,247 @@ class MatchService:
             match_finished=match_finished,
             point_winner_id=point_winner_id,
         )
+
+    async def choose_mastermind_code(
+        self, game_id: int, user_id: int, colors: Sequence[str] | str
+    ) -> Game:
+        code = normalize_mastermind_code(colors)
+        async with self.database.transaction() as connection:
+            game = await _locked_game(connection, game_id)
+            _require_player(game, user_id)
+            if (
+                game.game_type is not GameType.MASTERMIND
+                or game.status is not GameStatus.ACTIVE
+                or game.phase is not GamePhase.HIDING
+                or game.hider_id != user_id
+                or game.mastermind_secret is not None
+            ):
+                raise NotYourTurn
+            now = int(time.time())
+            cursor = await connection.execute(
+                """
+                UPDATE games SET mastermind_secret_json = ?, mastermind_attempts = 0,
+                    mastermind_guesses_json = '[]', mastermind_draft_json = '[]',
+                    phase = 'guessing', version = version + 1, updated_at = ?
+                WHERE id = ? AND version = ? AND phase = 'hiding'
+                """,
+                (json.dumps(code, separators=(",", ":")), now, game.id, game.version),
+            )
+            if cursor.rowcount != 1:
+                raise StaleAction
+            return await _locked_game(connection, game.id)
+
+    async def _record_mastermind_guess(
+        self,
+        connection: aiosqlite.Connection,
+        game: Game,
+        guess: tuple[str, ...],
+    ) -> MastermindGuessResult:
+        if (
+            game.game_type is not GameType.MASTERMIND
+            or game.status is not GameStatus.ACTIVE
+            or game.phase is not GamePhase.GUESSING
+            or game.mastermind_secret is None
+            or game.hider_id is None
+            or game.guesser_id is None
+            or game.player2_id is None
+        ):
+            raise NotYourTurn
+
+        black, white = evaluate_mastermind_guess(game.mastermind_secret, guess)
+        guesses = (*game.mastermind_guesses, MastermindGuess(guess, black, white))
+        attempts = len(guesses)
+        guessed_correctly = black == MASTERMIND_LENGTH
+        round_finished = guessed_correctly or attempts >= MASTERMIND_MAX_ATTEMPTS
+        serialized_guesses = json.dumps(
+            [
+                {"colors": item.colors, "black": item.black, "white": item.white}
+                for item in guesses
+            ],
+            separators=(",", ":"),
+        )
+        now = int(time.time())
+
+        if not round_finished:
+            cursor = await connection.execute(
+                """
+                UPDATE games SET mastermind_attempts = ?, mastermind_guesses_json = ?,
+                    mastermind_draft_json = '[]', version = version + 1, updated_at = ?
+                WHERE id = ? AND version = ? AND phase = 'guessing'
+                """,
+                (attempts, serialized_guesses, now, game.id, game.version),
+            )
+            if cursor.rowcount != 1:
+                raise StaleAction
+            updated = await _locked_game(connection, game.id)
+            return MastermindGuessResult(
+                game=updated,
+                guess=guess,
+                black=black,
+                white=white,
+                guesses=guesses,
+                guessed_correctly=False,
+                round_finished=False,
+                match_finished=False,
+                point_winner_id=None,
+                secret=game.mastermind_secret,
+            )
+
+        point_winner_id = game.guesser_id if guessed_correctly else game.hider_id
+        player1_score = game.player1_score + int(point_winner_id == game.creator_id)
+        player2_score = game.player2_score + int(point_winner_id == game.player2_id)
+        match_finished = game.hand_number == game.total_hands
+
+        if match_finished:
+            winner_id = game.creator_id if player1_score > player2_score else game.player2_id
+            loser_id = game.opponent_of(winner_id)
+            cursor = await connection.execute(
+                """
+                UPDATE games SET mastermind_attempts = ?, mastermind_guesses_json = ?,
+                    mastermind_draft_json = '[]', player1_score = ?, player2_score = ?,
+                    winner_id = ?, loser_id = ?, status = 'choice', phase = 'choice',
+                    version = version + 1, updated_at = ?
+                WHERE id = ? AND version = ? AND phase = 'guessing'
+                """,
+                (
+                    attempts,
+                    serialized_guesses,
+                    player1_score,
+                    player2_score,
+                    winner_id,
+                    loser_id,
+                    now,
+                    game.id,
+                    game.version,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise StaleAction
+            await record_match_result(connection, winner_id, loser_id)
+        else:
+            cursor = await connection.execute(
+                """
+                UPDATE games SET hand_number = hand_number + 1,
+                    player1_score = ?, player2_score = ?,
+                    mastermind_secret_json = NULL, mastermind_attempts = 0,
+                    mastermind_guesses_json = '[]', mastermind_draft_json = '[]',
+                    hider_id = guesser_id, guesser_id = hider_id,
+                    phase = 'hiding', version = version + 1, updated_at = ?
+                WHERE id = ? AND version = ? AND phase = 'guessing'
+                """,
+                (player1_score, player2_score, now, game.id, game.version),
+            )
+            if cursor.rowcount != 1:
+                raise StaleAction
+
+        await award_point(connection, game.id, point_winner_id, "round", game.hand_number)
+        updated = await _locked_game(connection, game.id)
+        return MastermindGuessResult(
+            game=updated,
+            guess=guess,
+            black=black,
+            white=white,
+            guesses=guesses,
+            guessed_correctly=guessed_correctly,
+            round_finished=True,
+            match_finished=match_finished,
+            point_winner_id=point_winner_id,
+            secret=game.mastermind_secret,
+        )
+
+    async def guess_mastermind(
+        self,
+        game_id: int,
+        user_id: int,
+        colors: Sequence[str] | str,
+        expected_version: int | None = None,
+    ) -> MastermindGuessResult:
+        guess = normalize_mastermind_code(colors)
+        async with self.database.transaction() as connection:
+            game = await _locked_game(connection, game_id)
+            _require_player(game, user_id)
+            if expected_version is not None:
+                _require_version(game, expected_version)
+            if game.guesser_id != user_id:
+                raise NotYourTurn
+            return await self._record_mastermind_guess(connection, game, guess)
+
+    async def select_mastermind_color(
+        self, game_id: int, user_id: int, color: str, expected_version: int
+    ) -> MastermindSelection:
+        if color not in MASTERMIND_COLORS:
+            raise InvalidGameSetup
+        async with self.database.transaction() as connection:
+            game = await _locked_game(connection, game_id)
+            _require_player(game, user_id)
+            _require_version(game, expected_version)
+            is_hider = game.phase is GamePhase.HIDING and game.hider_id == user_id
+            is_guesser = game.phase is GamePhase.GUESSING and game.guesser_id == user_id
+            if game.game_type is not GameType.MASTERMIND or not (is_hider or is_guesser):
+                raise NotYourTurn
+
+            selection = (*game.mastermind_draft, color)
+            if len(selection) < MASTERMIND_LENGTH:
+                cursor = await connection.execute(
+                    "UPDATE games SET mastermind_draft_json = ?, version = version + 1, "
+                    "updated_at = ? WHERE id = ? AND version = ?",
+                    (
+                        json.dumps(selection, separators=(",", ":")),
+                        int(time.time()),
+                        game.id,
+                        game.version,
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    raise StaleAction
+                updated = await _locked_game(connection, game.id)
+                return MastermindSelection(updated, selection, False)
+
+            if len(selection) != MASTERMIND_LENGTH:
+                raise InvalidGameSetup
+            normalized = normalize_mastermind_code(selection)
+            if is_hider:
+                cursor = await connection.execute(
+                    """
+                    UPDATE games SET mastermind_secret_json = ?, mastermind_attempts = 0,
+                        mastermind_guesses_json = '[]', mastermind_draft_json = '[]',
+                        phase = 'guessing', version = version + 1, updated_at = ?
+                    WHERE id = ? AND version = ? AND phase = 'hiding'
+                    """,
+                    (
+                        json.dumps(normalized, separators=(",", ":")),
+                        int(time.time()),
+                        game.id,
+                        game.version,
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    raise StaleAction
+                updated = await _locked_game(connection, game.id)
+                return MastermindSelection(updated, normalized, True)
+
+            result = await self._record_mastermind_guess(connection, game, normalized)
+            return MastermindSelection(result.game, normalized, True, result)
+
+    async def reset_mastermind_selection(
+        self, game_id: int, user_id: int, expected_version: int
+    ) -> Game:
+        async with self.database.transaction() as connection:
+            game = await _locked_game(connection, game_id)
+            _require_player(game, user_id)
+            _require_version(game, expected_version)
+            is_hider = game.phase is GamePhase.HIDING and game.hider_id == user_id
+            is_guesser = game.phase is GamePhase.GUESSING and game.guesser_id == user_id
+            if game.game_type is not GameType.MASTERMIND or not (is_hider or is_guesser):
+                raise NotYourTurn
+            cursor = await connection.execute(
+                "UPDATE games SET mastermind_draft_json = '[]', version = version + 1, "
+                "updated_at = ? WHERE id = ? AND version = ?",
+                (int(time.time()), game.id, game.version),
+            )
+            if cursor.rowcount != 1:
+                raise StaleAction
+            return await _locked_game(connection, game.id)
 
     async def place_mark(
         self, game_id: int, user_id: int, cell: int, expected_version: int

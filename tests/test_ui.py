@@ -1,6 +1,7 @@
 from bazi_chi_bot.models import GamePhase, GameType
 from bazi_chi_bot.ui import (
     START_TEXT,
+    SUPPORT_TEXT,
     TRUTH_OR_DARE_RULE,
     admin_menu_keyboard,
     countdown_users_keyboard,
@@ -35,6 +36,8 @@ def test_required_branding_and_final_rule_are_present():
     assert "جرئت یا حقیقت" in START_TEXT
     assert "حدس کلمه" in START_TEXT
     assert "صادق" in START_TEXT
+    assert "@bazi_chi_admin" in SUPPORT_TEXT
+    assert "صادق" in SUPPORT_TEXT
     assert "حقیقت" in TRUTH_OR_DARE_RULE
     assert "جرئت" in TRUTH_OR_DARE_RULE
     assert "برنده" in TRUTH_OR_DARE_RULE
@@ -60,6 +63,7 @@ async def test_admin_controls_are_behind_an_admin_only_menu(players):
     assert "menu:countdown" not in regular_callbacks
     assert "menu:leaderboard" in regular_callbacks
     assert "menu:leaderboard:all_time" in regular_callbacks
+    assert "menu:support" in regular_callbacks
     assert "menu:countdown" not in admin_callbacks
     assert "menu:admin" in admin_callbacks
     admin_menu_callbacks = {

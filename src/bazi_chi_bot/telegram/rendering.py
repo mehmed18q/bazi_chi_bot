@@ -12,9 +12,11 @@ from ..models import (
     GameStatus,
     GameType,
     LeaderboardEntry,
+    MastermindGuess,
     WordGuess,
 )
 from .keyboards import board_text
+from ..rules import MASTERMIND_COLOR_EMOJIS, MASTERMIND_MAX_ATTEMPTS
 from .texts import FINAL_LABELS, TRUTH_OR_DARE_RULE
 
 
@@ -26,6 +28,15 @@ def word_guess_board(guesses: tuple[WordGuess, ...]) -> str:
             for character, status in zip(item.text, item.feedback, strict=True)
         )
         for item in guesses
+    )
+
+
+def mastermind_board(guesses: tuple[MastermindGuess, ...]) -> str:
+    """Render color guesses and their black/white peg feedback."""
+    return "\n".join(
+        " ".join(MASTERMIND_COLOR_EMOJIS.get(color, "⚪") for color in guess.colors)
+        + f"  ➜  ⚫ {guess.black} | ⚪ {guess.white}"
+        for guess in guesses
     )
 
 
@@ -54,6 +65,11 @@ def render_game(
         header = f"🎭 <b>جرئت یا حقیقت #{game.id}</b>\n🧮 {game.total_hands} دور"
     elif game.game_type is GameType.WORD_GUESS:
         header = f"🔤 <b>حدس کلمه #{game.id}</b>\n🧮 {game.total_hands} دور"
+    elif game.game_type is GameType.MASTERMIND:
+        header = (
+            f"🎨 <b>فکر بکر #{game.id}</b>\n"
+            f"🧮 {game.total_hands} دور | 🎯 {MASTERMIND_MAX_ATTEMPTS} تلاش در هر دور"
+        )
 
     if game.status is GameStatus.WAITING:
         link = (
@@ -63,7 +79,11 @@ def render_game(
         )
         return f"{header}\n\n⏳ <b>منتظر هم‌بازی</b>\nلینک دعوت را برای دوستت بفرست.{link}"
 
-    round_name = "دور" if game.game_type in {GameType.TRUTH_OR_DARE, GameType.WORD_GUESS} else "دست"
+    round_name = (
+        "دور"
+        if game.game_type in {GameType.TRUTH_OR_DARE, GameType.WORD_GUESS, GameType.MASTERMIND}
+        else "دست"
+    )
     hand = f"\n\n🎲 {round_name} <b>{game.hand_number}</b> از <b>{game.total_hands}</b>"
     if game.game_type is GameType.TIC_TAC_TOE and game.status is GameStatus.ACTIVE:
         symbol = "❌" if viewer_id == game.creator_id else "⭕"
@@ -102,6 +122,45 @@ def render_game(
                     "منتظر حدس هم‌بازی‌ات باش."
                     f"{history}{legend}"
                 )
+    elif game.game_type is GameType.MASTERMIND and game.phase is GamePhase.HIDING:
+        chosen = " ".join(
+            MASTERMIND_COLOR_EMOJIS.get(color, "⚪") for color in game.mastermind_draft
+        )
+        progress = f"\nانتخاب فعلی: {chosen}" if chosen else ""
+        state = (
+            "🎨 <b>کد چهاررنگ را بساز.</b>\n"
+            "رنگ‌ها: 🔵 آبی، 🟡 زرد، ⚫ مشکی، ⚪ سفید، 🔴 قرمز، 🟢 سبز\n"
+            "چهار مهره انتخاب کن؛ تکرار رنگ هم مجاز است."
+            f"{progress}"
+            if game.hider_id == viewer_id
+            else f"⏳ {opponent} در حال ساختن کد مخفی است..."
+        )
+    elif game.game_type is GameType.MASTERMIND and game.phase is GamePhase.GUESSING:
+        board = mastermind_board(game.mastermind_guesses)
+        history = f"\n\n{board}" if board else ""
+        remaining = MASTERMIND_MAX_ATTEMPTS - game.mastermind_attempts
+        draft = " ".join(MASTERMIND_COLOR_EMOJIS.get(color, "⚪") for color in game.mastermind_draft)
+        draft_text = f"\nانتخاب فعلی: {draft}" if draft else ""
+        legend = "\n\n⚫ سیاه: رنگ و جای درست  |  ⚪ سفید: رنگ درست، جای اشتباه"
+        if game.guesser_id == viewer_id:
+            state = (
+                "🎨 <b>کد چهاررنگ را حدس بزن.</b>\n"
+                f"تلاش باقی‌مانده: <b>{remaining}</b>\n"
+                "رنگ‌ها: 🔵 آبی، 🟡 زرد، ⚫ مشکی، ⚪ سفید، 🔴 قرمز، 🟢 سبز\n"
+                "چهار رنگ را به‌ترتیب انتخاب کن."
+                f"{draft_text}{history}{legend}"
+            )
+        else:
+            secret = " ".join(
+                MASTERMIND_COLOR_EMOJIS.get(color, "⚪")
+                for color in (game.mastermind_secret or ())
+            )
+            state = (
+                f"🔐 کد تو: <b>{secret}</b>\n"
+                f"تلاش‌های باقی‌ماندهٔ {opponent}: <b>{remaining}</b>\n"
+                "منتظر حدس هم‌بازی‌ات باش."
+                f"{history}{legend}"
+            )
     elif game.game_type is GameType.TRUTH_OR_DARE and game.phase is GamePhase.CHOICE:
         if game.challenge_kind is not None:
             label = FINAL_LABELS[game.challenge_kind]

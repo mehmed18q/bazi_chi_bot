@@ -1,6 +1,7 @@
 """Shared domain validation; no I/O or framework dependencies."""
 
 import unicodedata
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 from .errors import (
@@ -18,6 +19,31 @@ ALLOWED_HAND_COUNTS = frozenset((3, 5, 7, 9))
 MAX_FINAL_MESSAGE_LENGTH = 3000
 MIN_WORD_LENGTH = 2
 MAX_WORD_LENGTH = 20
+MASTERMIND_LENGTH = 4
+MASTERMIND_MAX_ATTEMPTS = 8
+MASTERMIND_COLORS = ("blue", "yellow", "black", "white", "red", "green")
+MASTERMIND_COLOR_EMOJIS = {
+    "blue": "🔵",
+    "yellow": "🟡",
+    "black": "⚫",
+    "white": "⚪",
+    "red": "🔴",
+    "green": "🟢",
+}
+MASTERMIND_COLOR_ALIASES = {
+    "b": "blue",
+    "🔵": "blue",
+    "y": "yellow",
+    "🟡": "yellow",
+    "k": "black",
+    "⚫": "black",
+    "w": "white",
+    "⚪": "white",
+    "r": "red",
+    "🔴": "red",
+    "g": "green",
+    "🟢": "green",
+}
 
 WINNING_LINES = (
     (0, 1, 2),
@@ -87,6 +113,49 @@ def evaluate_word_guess(secret: str, guess: str) -> str:
             feedback[index] = "y"
             remaining[character] -= 1
     return "".join(feedback)
+
+
+def normalize_mastermind_code(colors: Sequence[str] | str) -> tuple[str, ...]:
+    """Normalize a four-color Mastermind code and reject unknown colors."""
+    if isinstance(colors, str):
+        raw = tuple(
+            part.strip().casefold()
+            for part in colors.replace("،", ",").split(",")
+            if part.strip()
+        )
+        if len(raw) == 1 and len(raw[0]) == MASTERMIND_LENGTH:
+            raw = tuple(raw[0])
+    else:
+        try:
+            raw = tuple(str(color).strip().casefold() for color in colors)
+        except TypeError as error:
+            raise InvalidWord from error
+    normalized = tuple(MASTERMIND_COLOR_ALIASES.get(color, color) for color in raw)
+    if len(normalized) != MASTERMIND_LENGTH or any(
+        color not in MASTERMIND_COLORS for color in normalized
+    ):
+        raise InvalidWord
+    return normalized
+
+
+def evaluate_mastermind_guess(
+    secret: Sequence[str] | str, guess: Sequence[str] | str
+) -> tuple[int, int]:
+    """Return (black, white) pegs, accounting correctly for duplicate colors."""
+    target = normalize_mastermind_code(secret)
+    attempt = normalize_mastermind_code(guess)
+    black = sum(left == right for left, right in zip(target, attempt, strict=True))
+    remaining_target: dict[str, int] = {}
+    remaining_attempt: dict[str, int] = {}
+    for target_color, guess_color in zip(target, attempt, strict=True):
+        if target_color != guess_color:
+            remaining_target[target_color] = remaining_target.get(target_color, 0) + 1
+            remaining_attempt[guess_color] = remaining_attempt.get(guess_color, 0) + 1
+    white = sum(
+        min(count, remaining_attempt.get(color, 0))
+        for color, count in remaining_target.items()
+    )
+    return black, white
 
 
 def _require_player(game: Game, user_id: int) -> None:

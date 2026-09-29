@@ -11,6 +11,7 @@ class GameType(StrEnum):
     TIC_TAC_TOE = "tic_tac_toe"
     TRUTH_OR_DARE = "truth_or_dare"
     WORD_GUESS = "word_guess"
+    MASTERMIND = "mastermind"
 
 
 class GameStatus(StrEnum):
@@ -119,6 +120,13 @@ class WordGuess:
 
 
 @dataclass(frozen=True, slots=True)
+class MastermindGuess:
+    colors: tuple[str, ...]
+    black: int
+    white: int
+
+
+@dataclass(frozen=True, slots=True)
 class Game:
     id: int
     invite_token: str
@@ -161,6 +169,10 @@ class Game:
     word_secret: str | None = None
     word_attempts: int = 0
     word_guesses: tuple[WordGuess, ...] = ()
+    mastermind_secret: tuple[str, ...] | None = None
+    mastermind_attempts: int = 0
+    mastermind_guesses: tuple[MastermindGuess, ...] = ()
+    mastermind_draft: tuple[str, ...] = ()
 
     def score_for(self, user_id: int) -> int:
         if user_id == self.creator_id:
@@ -209,6 +221,28 @@ class WordGuessResult:
     round_finished: bool
     match_finished: bool
     point_winner_id: int | None
+
+
+@dataclass(frozen=True, slots=True)
+class MastermindGuessResult:
+    game: Game
+    guess: tuple[str, ...]
+    black: int
+    white: int
+    guesses: tuple[MastermindGuess, ...]
+    guessed_correctly: bool
+    round_finished: bool
+    match_finished: bool
+    point_winner_id: int | None
+    secret: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class MastermindSelection:
+    game: Game
+    selection: tuple[str, ...]
+    complete: bool
+    result: MastermindGuessResult | None = None
 
 
 @dataclass(frozen=True, slots=True)

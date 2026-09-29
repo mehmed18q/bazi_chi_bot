@@ -19,6 +19,7 @@ from ..models import GameType
 from ..ui import (
     HELP_TEXT,
     START_TEXT,
+    SUPPORT_TEXT,
     leaderboard_text,
     menu_keyboard,
     question_kind_keyboard,
@@ -85,13 +86,16 @@ def register_handlers(
         return {
             GameType.GOL_YA_POOCH: "گل یا پوچ 🌸",
             GameType.TIC_TAC_TOE: "دوز سه‌تایی ❌⭕",
-            GameType.TRUTH_OR_DARE: "جرئت یا حقیقت 🎭",
             GameType.WORD_GUESS: "حدس کلمه 🔤",
+            GameType.MASTERMIND: "فکر بکر 🎨",
+            GameType.TRUTH_OR_DARE: "جرئت یا حقیقت 🎭",
         }[game_type]
 
     def first_turn_text(game_type: GameType) -> str:
         if game_type is GameType.WORD_GUESS:
             return "🔔 بازی شروع شد؛ نوبت توست کلمهٔ مخفی را انتخاب کنی!"
+        if game_type is GameType.MASTERMIND:
+            return "🔔 بازی شروع شد؛ نوبت توست کد چهاررنگ را بسازی!"
         return "🔔 بازی شروع شد؛ نوبت توست!"
 
     @router.callback_query(F.data == "menu:add_question")
@@ -426,6 +430,7 @@ def register_handlers(
                         GameType.TIC_TAC_TOE,
                         GameType.GOL_YA_POOCH,
                         GameType.WORD_GUESS,
+                        GameType.MASTERMIND,
                     }
                     and first_turn == game.creator_id
                 ):
@@ -493,6 +498,7 @@ def register_handlers(
                         GameType.TIC_TAC_TOE,
                         GameType.GOL_YA_POOCH,
                         GameType.WORD_GUESS,
+                        GameType.MASTERMIND,
                     }
                     and first_turn == game.creator_id
                 ):
@@ -610,6 +616,16 @@ def register_handlers(
         )
         await callback.answer()
 
+    @router.callback_query(F.data == "menu:daily_challenge")
+    async def daily_challenge_soon(callback: CallbackQuery) -> None:
+        await safe_edit(
+            callback,
+            "🎯 <b>چالش روزانه</b>\n\n"
+            "این بخش به‌زودی راه‌اندازی می‌شود؛ هر روز یک چالش تازه برایت آماده خواهد بود. ⏳",
+            main_menu(callback.from_user.id),
+        )
+        await callback.answer("به‌زودی فعال می‌شود ⏳")
+
     @router.callback_query(F.data == "noop")
     async def noop(callback: CallbackQuery) -> None:
         await callback.answer()
@@ -635,6 +651,11 @@ def register_handlers(
     @router.callback_query(F.data == "menu:help")
     async def menu_help(callback: CallbackQuery) -> None:
         await safe_edit(callback, HELP_TEXT, main_menu(callback.from_user.id))
+        await callback.answer()
+
+    @router.callback_query(F.data == "menu:support")
+    async def menu_support(callback: CallbackQuery) -> None:
+        await safe_edit(callback, SUPPORT_TEXT, main_menu(callback.from_user.id))
         await callback.answer()
 
     @router.callback_query(F.data == "menu:profile")
