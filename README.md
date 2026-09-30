@@ -260,6 +260,9 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now bazi_chi_bot.service
 ```
 
+مراحل تکرارپذیر هر به‌روزرسانی، پشتیبان‌گیری و بازگشت در
+[راهنمای به‌روزرسانی سرور](DEPLOYMENT.md) آمده است.
+
 وضعیت و لاگ‌ها:
 
 ```bash
