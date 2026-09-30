@@ -102,7 +102,7 @@ async def test_start_shows_games_then_exact_activation_amount(service, players):
     await handler(message, SimpleNamespace(args=None), bot, state)
 
     assert message.answer.await_count == 2
-    assert "چهار بازی" in message.answer.await_args_list[0].args[0]
+    assert "پنج بازی" in message.answer.await_args_list[0].args[0]
     payment_text = message.answer.await_args_list[1].args[0]
     assert "100,001 تومان" in payment_text
     assert "6219861814466156" in payment_text

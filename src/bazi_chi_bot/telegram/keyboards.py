@@ -197,8 +197,9 @@ def game_types_keyboard() -> InlineKeyboardMarkup:
     builder.button(text="🔤 حدس کلمه", callback_data="setup:type:word")
     builder.button(text="🎨 فکر بکر", callback_data="setup:type:mastermind")
     builder.button(text="🎭 جرئت یا حقیقت", callback_data="setup:type:tod")
+    builder.button(text="🎲 بازی شانسی", callback_data="setup:type:random")
     builder.button(text="🏠 منوی اصلی", callback_data="menu:home")
-    builder.adjust(2, 2, 1, 1)
+    builder.adjust(2, 2, 1, 1, 1)
     return builder.as_markup()
 
 

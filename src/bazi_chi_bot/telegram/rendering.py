@@ -19,15 +19,28 @@ from .keyboards import board_text
 from ..rules import MASTERMIND_COLOR_EMOJIS, MASTERMIND_MAX_ATTEMPTS
 from .texts import FINAL_LABELS, TRUTH_OR_DARE_RULE
 
+GAME_TEXT_PREVIEW_LENGTH = 1200
+
+
+def game_text_preview(text: str) -> str:
+    preview = escape(text[:GAME_TEXT_PREVIEW_LENGTH])
+    if len(text) > GAME_TEXT_PREVIEW_LENGTH:
+        preview += "\n… متن کامل در پیام جداگانهٔ همین بازی آمده است."
+    return preview
+
 
 def word_guess_board(guesses: tuple[WordGuess, ...]) -> str:
     icons = {"g": "🟩", "y": "🟨", "b": "⬛"}
-    return "\n".join(
+    # A 20-letter word can be guessed 20 times; all rows plus a result banner
+    # exceed Telegram's single-message limit. Keep the useful recent history.
+    recent = guesses[-8:]
+    earlier = f"… {len(guesses) - len(recent)} حدس قبلی\n" if len(guesses) > 8 else ""
+    return earlier + "\n".join(
         " ".join(
             f"{icons.get(status, '⬛')}<b>{escape(character)}</b>"
             for character, status in zip(item.text, item.feedback, strict=True)
         )
-        for item in guesses
+        for item in recent
     )
 
 
@@ -139,13 +152,18 @@ def render_game(
         board = mastermind_board(game.mastermind_guesses)
         history = f"\n\n{board}" if board else ""
         remaining = MASTERMIND_MAX_ATTEMPTS - game.mastermind_attempts
+        progress = (
+            f"\n🎯 تلاش باقی‌مانده: <b>{remaining}</b> | "
+            f"📋 ردیف‌های انجام‌شده: <b>{len(game.mastermind_guesses)}</b> از "
+            f"<b>{MASTERMIND_MAX_ATTEMPTS}</b>"
+        )
         draft = " ".join(MASTERMIND_COLOR_EMOJIS.get(color, "⚪") for color in game.mastermind_draft)
         draft_text = f"\nانتخاب فعلی: {draft}" if draft else ""
         legend = "\n\n⚫ سیاه: رنگ و جای درست  |  ⚪ سفید: رنگ درست، جای اشتباه"
         if game.guesser_id == viewer_id:
             state = (
                 "🎨 <b>کد چهاررنگ را حدس بزن.</b>\n"
-                f"تلاش باقی‌مانده: <b>{remaining}</b>\n"
+                f"{progress}\n"
                 "رنگ‌ها: 🔵 آبی، 🟡 زرد، ⚫ مشکی، ⚪ سفید، 🔴 قرمز، 🟢 سبز\n"
                 "چهار رنگ را به‌ترتیب انتخاب کن."
                 f"{draft_text}{history}{legend}"
@@ -157,7 +175,9 @@ def render_game(
             )
             state = (
                 f"🔐 کد تو: <b>{secret}</b>\n"
-                f"تلاش‌های باقی‌ماندهٔ {opponent}: <b>{remaining}</b>\n"
+                f"🎯 تلاش‌های باقی‌ماندهٔ {opponent}: <b>{remaining}</b> | "
+                f"📋 ردیف‌های انجام‌شده: <b>{len(game.mastermind_guesses)}</b> از "
+                f"<b>{MASTERMIND_MAX_ATTEMPTS}</b>\n"
                 "منتظر حدس هم‌بازی‌ات باش."
                 f"{history}{legend}"
             )
@@ -177,7 +197,7 @@ def render_game(
                 else "⏳ منتظر انتخاب «حقیقت» یا «جرئت» از طرف هم‌بازی‌ات باش."
             )
     elif game.game_type is GameType.TRUTH_OR_DARE and game.phase is GamePhase.GUESSING:
-        prompt = escape(game.challenge_prompt_text or "")
+        prompt = game_text_preview(game.challenge_prompt_text or "")
         challenge_label = FINAL_LABELS.get(game.challenge_kind, "جرئت یا حقیقت")
         state = (
             f"🎭 <b>{challenge_label}</b>\n\n{prompt}\n\n✍️ پاسخت را همینجا بفرست."
@@ -185,7 +205,10 @@ def render_game(
             else f"🎭 <b>سؤال یا چالش:</b>\n{prompt}\n\n⏳ منتظر پاسخ هم‌بازی‌ات باش."
         )
     elif game.game_type is GameType.TRUTH_OR_DARE and game.phase is GamePhase.FINISHED:
-        state = f"📩 <b>پاسخ:</b>\n{escape(game.challenge_response_text or '')}"
+        state = (
+            f"🎭 <b>سؤال یا چالش:</b>\n{game_text_preview(game.challenge_prompt_text or '')}"
+            f"\n\n📩 <b>پاسخ:</b>\n{game_text_preview(game.challenge_response_text or '')}"
+        )
         if game.challenge_approved is True:
             if game.challenge_respondent_id == viewer_id:
                 state += "\n\n✅ تأیید شد؛ یک امتیاز گرفتی."
@@ -227,10 +250,10 @@ def render_game(
         choice = game.final_choice
         label = FINAL_LABELS.get(choice, "انتخاب نامشخص")
         if game.final_question_id is not None:
-            prompt = escape(game.final_prompt_text or "")
+            prompt = game_text_preview(game.final_prompt_text or "")
             state = f"🎭 <b>{label}</b>\n\n<b>متن سؤال یا چالش:</b>\n{prompt}"
             if game.final_response_text is not None:
-                state += f"\n\n📩 <b>پاسخ:</b>\n{escape(game.final_response_text)}"
+                state += f"\n\n📩 <b>پاسخ:</b>\n{game_text_preview(game.final_response_text)}"
             elif game.loser_id == viewer_id:
                 state += "\n\n✍️ جوابت را همینجا بفرست تا برای برنده ارسال شود."
             else:

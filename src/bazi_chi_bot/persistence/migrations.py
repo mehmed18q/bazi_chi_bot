@@ -715,4 +715,35 @@ MIGRATIONS: tuple[str, ...] = (
     ALTER TABLE games ADD COLUMN mastermind_guesses_json TEXT NOT NULL DEFAULT '[]';
     ALTER TABLE games ADD COLUMN mastermind_draft_json TEXT NOT NULL DEFAULT '[]';
     """,
+    """
+    -- Schema 21 could contain aggregate-only scores added after its earlier
+    -- backfill. Preserve those balances when upgrading existing installations.
+    INSERT INTO score_events (user_id, reason, amount, created_at)
+        SELECT telegram_id, 'legacy', points_won, unixepoch() FROM user_stats
+        WHERE points_won > 0 AND NOT EXISTS (
+            SELECT 1 FROM score_events s WHERE s.user_id = user_stats.telegram_id
+        );
+    UPDATE user_stats SET points_won = (
+        SELECT COALESCE(SUM(amount), 0) FROM score_events s
+        WHERE s.user_id = user_stats.telegram_id
+    );
+
+    -- The internal payment id can also be NULL for users imported into an
+    -- already-upgraded database. Assign only missing ids without renumbering
+    -- existing users.
+    CREATE TEMP TABLE missing_payment_ids (
+        user_rowid INTEGER PRIMARY KEY,
+        new_id INTEGER NOT NULL
+    );
+    INSERT INTO missing_payment_ids (user_rowid, new_id)
+        SELECT rowid,
+               (SELECT COALESCE(MAX(id), 0) FROM users)
+                   + ROW_NUMBER() OVER (ORDER BY rowid)
+        FROM users
+        WHERE id IS NULL;
+    UPDATE users
+    SET id = (SELECT new_id FROM missing_payment_ids WHERE user_rowid = users.rowid)
+    WHERE id IS NULL;
+    DROP TABLE missing_payment_ids;
+    """,
 )

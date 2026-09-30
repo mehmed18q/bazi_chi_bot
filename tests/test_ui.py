@@ -1,4 +1,11 @@
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
+import pytest
+
+from bazi_chi_bot.handlers import build_router
 from bazi_chi_bot.models import GamePhase, GameType
+from bazi_chi_bot.telegram import gameplay
 from bazi_chi_bot.ui import (
     START_TEXT,
     SUPPORT_TEXT,
@@ -6,10 +13,58 @@ from bazi_chi_bot.ui import (
     admin_menu_keyboard,
     countdown_users_keyboard,
     game_keyboard,
+    game_types_keyboard,
     menu_keyboard,
     render_game,
     stats_text,
 )
+
+
+@pytest.mark.parametrize(
+    ("game_type", "name", "next_callback"),
+    [
+        (GameType.GOL_YA_POOCH, "گل یا پوچ", "setup:f:2"),
+        (GameType.TIC_TAC_TOE, "دوز سه‌تایی", "setup:ttt:3"),
+        (GameType.TRUTH_OR_DARE, "جرئت یا حقیقت", "setup:tod:3"),
+        (GameType.WORD_GUESS, "حدس کلمه", "setup:word:3"),
+        (GameType.MASTERMIND, "فکر بکر", "setup:mastermind:3"),
+    ],
+)
+async def test_random_game_opens_the_selected_games_setup(
+    service, monkeypatch, game_type, name, next_callback
+):
+    menu_callbacks = {
+        button.callback_data
+        for row in game_types_keyboard().inline_keyboard
+        for button in row
+    }
+    assert "setup:type:random" in menu_callbacks
+
+    def pick_game(candidates):
+        assert set(candidates) == set(GameType)
+        return game_type
+
+    monkeypatch.setattr(gameplay, "choice", pick_game)
+    handler = next(
+        item.callback
+        for item in build_router(service).callback_query.handlers
+        if item.callback.__name__ == "setup_random"
+    )
+    callback = SimpleNamespace(
+        message=SimpleNamespace(edit_text=AsyncMock()),
+        answer=AsyncMock(),
+    )
+
+    await handler(callback)
+
+    text = callback.message.edit_text.call_args.args[0]
+    keyboard = callback.message.edit_text.call_args.kwargs["reply_markup"]
+    callbacks = {
+        button.callback_data for row in keyboard.inline_keyboard for button in row
+    }
+    assert "بازی شانسی" in text and name in text
+    assert next_callback in callbacks
+    callback.answer.assert_awaited_once()
 
 
 async def test_only_current_actor_receives_action_keyboard(service, players):

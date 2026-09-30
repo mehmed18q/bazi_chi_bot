@@ -32,7 +32,7 @@ from ..game import (
     StaleAction,
 )
 from ..models import Game, MastermindGuessResult, TurnResult, User, WordGuessResult
-from ..rules import MASTERMIND_COLOR_EMOJIS
+from ..rules import MASTERMIND_COLOR_EMOJIS, MASTERMIND_MAX_ATTEMPTS
 from ..ui import (
     FINAL_LABELS,
     game_keyboard,
@@ -40,6 +40,7 @@ from ..ui import (
     word_guess_board,
     mastermind_board,
 )
+from .rendering import GAME_TEXT_PREVIEW_LENGTH
 
 logger = logging.getLogger(__name__)
 
@@ -169,15 +170,35 @@ async def safe_send(bot: Bot, chat_id: int, text: str, reply_markup: object = No
     return None
 
 
+async def send_full_game_text_if_needed(
+    bot: Bot, user_id: int, game: Game, label: str, text: str | None
+) -> None:
+    """Keep long questions/answers readable while the card stays within Telegram's limit."""
+    if text is not None and len(text) > GAME_TEXT_PREVIEW_LENGTH:
+        await safe_send(
+            bot,
+            user_id,
+            f"📄 <b>{label} | بازی #{game.id}</b>\n\n{escape(text)}",
+        )
+
+
+async def safe_delete(bot: Bot, chat_id: int, message_id: int) -> None:
+    """Best-effort cleanup for an obsolete bot message."""
+    delete_message = getattr(bot, "delete_message", None)
+    if not callable(delete_message):
+        return
+    try:
+        await delete_message(chat_id, message_id)
+    except TelegramAPIError:
+        logger.debug("Could not remove obsolete game message %s/%s", chat_id, message_id)
+
+
 _notification_tasks: set[asyncio.Task[None]] = set()
 
 
 async def _delete_turn_notification(bot: Bot, chat_id: int, message_id: int, delay: float) -> None:
     await asyncio.sleep(delay)
-    try:
-        await bot.delete_message(chat_id, message_id)
-    except TelegramAPIError:
-        logger.debug("Could not remove turn notification %s/%s", chat_id, message_id)
+    await safe_delete(bot, chat_id, message_id)
 
 
 async def notify_turn(
@@ -221,14 +242,19 @@ def round_result_text(result: TurnResult, names: dict[int, str]) -> str:
 
 
 def word_round_result_text(result: WordGuessResult, names: dict[int, str]) -> str:
-    board = word_guess_board(result.guesses)
+    board = word_guess_board(result.guesses if result.round_finished else result.guesses[-1:])
     if not result.round_finished:
-        return f"🔤 <b>نتیجهٔ حدس:</b>\n\n{board}"
+        return (
+            "🔤 <b>نتیجهٔ حدس:</b>\n"
+            f"❌ حدس <b>{escape(result.guess)}</b> درست نبود.\n"
+            f"🎯 فرصت باقی‌مانده: <b>{len(result.secret) - result.game.word_attempts}</b>\n\n"
+            f"{board}"
+        )
     point_winner = escape(names.get(result.point_winner_id, "بازیکن"))
     outcome = (
-        "🎯 <b>کلمه درست حدس زده شد!</b>"
+        "🎯 <b>حدست درست بود؛ کلمه را پیدا کردی!</b>"
         if result.guessed_correctly
-        else "⌛ <b>فرصت‌های حدس تمام شد.</b>"
+        else "⌛ <b>حدست درست نبود و فرصت‌های حدس تمام شد.</b>"
     )
     return (
         f"{outcome}\n"
@@ -239,9 +265,17 @@ def word_round_result_text(result: WordGuessResult, names: dict[int, str]) -> st
 
 
 def mastermind_round_result_text(result: MastermindGuessResult, names: dict[int, str]) -> str:
-    board = mastermind_board(result.guesses)
+    board = mastermind_board(result.guesses if result.round_finished else result.guesses[-1:])
     if not result.round_finished:
-        return f"🎨 <b>نتیجهٔ حدس:</b> ⚫ {result.black} | ⚪ {result.white}\n\n{board}"
+        remaining = MASTERMIND_MAX_ATTEMPTS - result.game.mastermind_attempts
+        return (
+            "🎨 <b>نتیجهٔ حدس:</b>\n"
+            "❌ این ردیف کد مخفی را کامل پیدا نکرد.\n"
+            f"⚫ {result.black} | ⚪ {result.white}\n"
+            f"🎯 تلاش باقی‌مانده: <b>{remaining}</b> | "
+            f"📋 ردیف‌های انجام‌شده: <b>{len(result.guesses)}</b> از "
+            f"<b>{MASTERMIND_MAX_ATTEMPTS}</b>\n\n{board}"
+        )
     point_winner = escape(names.get(result.point_winner_id, "بازیکن"))
     outcome = (
         "🎯 <b>کد را درست حدس زدی!</b>"
@@ -269,62 +303,104 @@ class GamePresenter:
         self.service = service
 
     async def send_game_view(
-        self, bot: Bot, game: Game, user_id: int, prefix: str | None = None
-    ) -> None:
+        self,
+        bot: Bot,
+        game: Game,
+        user_id: int,
+        prefix: str | None = None,
+        *,
+        fresh: bool = False,
+    ) -> bool:
+        """Update a card, or bring a changed turn to the bottom of the chat."""
         text, keyboard = await view_for(self.service, bot, game, user_id)
         if prefix:
             text = f"{prefix}\n\n{text}"
         stored = await self.service.game_message(game.id, user_id)
-        if stored is not None:
+        if stored is not None and not fresh:
             chat_id, message_id = stored
-            try:
-                await bot.edit_message_text(
-                    text,
-                    chat_id=chat_id,
-                    message_id=message_id,
-                    reply_markup=keyboard,
-                )
-                return
-            except TelegramBadRequest as error:
-                if "message is not modified" in str(error).lower():
-                    return
-                logger.info(
-                    "Stored game message %s/%s is no longer editable: %s",
-                    chat_id,
-                    message_id,
-                    error,
-                )
-            except TelegramForbiddenError:
-                logger.warning("Player %s blocked or stopped the bot", user_id)
-                return
-            except TelegramAPIError as error:
-                logger.warning("Could not update game message for player %s: %s", user_id, error)
-                return
+            edit_message_text = getattr(bot, "edit_message_text", None)
+            if callable(edit_message_text):
+                try:
+                    await edit_message_text(
+                        text,
+                        chat_id=chat_id,
+                        message_id=message_id,
+                        reply_markup=keyboard,
+                    )
+                    return True
+                except TelegramBadRequest as error:
+                    if "message is not modified" in str(error).lower():
+                        return True
+                    logger.info(
+                        "Stored game message %s/%s is no longer editable: %s",
+                        chat_id,
+                        message_id,
+                        error,
+                    )
+                    await safe_delete(bot, chat_id, message_id)
+                except TelegramForbiddenError:
+                    logger.warning("Player %s blocked or stopped the bot", user_id)
+                    return False
+                except TelegramAPIError as error:
+                    logger.warning("Could not update game message for player %s: %s", user_id, error)
+                    return False
 
         message = await safe_send(bot, user_id, text, keyboard)
         message_id = getattr(message, "message_id", None)
         if isinstance(message_id, int) and not isinstance(message_id, bool):
             await self.service.save_game_message(game.id, user_id, user_id, message_id)
+            if fresh and stored is not None and stored != (user_id, message_id):
+                await safe_delete(bot, stored[0], stored[1])
+            return True
+        if fresh and stored is not None:
+            # The new message was not delivered; leave the existing card usable.
+            await self.send_game_view(bot, game, user_id, prefix)
+        return False
 
     async def edit_game_view(
-        self, callback: CallbackQuery, bot: Bot, game: Game, prefix: str | None = None
+        self,
+        callback: CallbackQuery,
+        bot: Bot,
+        game: Game,
+        prefix: str | None = None,
+        *,
+        fresh: bool = False,
     ) -> None:
         text, keyboard = await view_for(self.service, bot, game, callback.from_user.id)
         if prefix:
             text = f"{prefix}\n\n{text}"
+        message = callback.message
+        message_id = getattr(message, "message_id", None)
+        chat = getattr(message, "chat", None)
+        chat_id = getattr(chat, "id", callback.from_user.id)
+        current_pair = (
+            (chat_id, message_id)
+            if isinstance(message_id, int)
+            and not isinstance(message_id, bool)
+            and isinstance(chat_id, int)
+            and not isinstance(chat_id, bool)
+            else None
+        )
+        stored = await self.service.game_message(game.id, callback.from_user.id)
+
+        if fresh and await self.send_game_view(
+            bot, game, callback.from_user.id, prefix, fresh=True
+        ):
+            if current_pair is not None and current_pair != stored:
+                await safe_delete(bot, current_pair[0], current_pair[1])
+            return
+
         if await safe_edit(callback, text, keyboard):
-            message = callback.message
-            message_id = getattr(message, "message_id", None)
-            chat = getattr(message, "chat", None)
-            chat_id = getattr(chat, "id", callback.from_user.id)
-            if (
-                isinstance(message_id, int)
-                and not isinstance(message_id, bool)
-                and isinstance(chat_id, int)
-                and not isinstance(chat_id, bool)
-            ):
-                await self.service.save_game_message(
-                    game.id, callback.from_user.id, chat_id, message_id
-                )
+            # Review buttons can be attached to a one-off notification. Keep
+            # the original persistent card as the source of truth.
+            if stored is None or stored == current_pair:
+                if current_pair is not None:
+                    await self.service.save_game_message(
+                        game.id, callback.from_user.id, current_pair[0], current_pair[1]
+                    )
+            elif stored is not None:
+                if current_pair is not None:
+                    await safe_delete(bot, current_pair[0], current_pair[1])
+                await self.send_game_view(bot, game, callback.from_user.id, prefix)
             return
         await self.send_game_view(bot, game, callback.from_user.id, prefix)

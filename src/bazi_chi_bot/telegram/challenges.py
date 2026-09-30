@@ -13,7 +13,6 @@ from ..game import (
 )
 from ..models import Game, GamePhase, GameStatus, GameType
 from ..ui import (
-    game_keyboard,
     menu_keyboard,
 )
 from .shared import (
@@ -21,8 +20,7 @@ from .shared import (
     final_choice_label,
     game_error_text,
     game_names,
-    notify_turn,
-    safe_send,
+    send_full_game_text_if_needed,
     telegram_user,
     word_round_result_text,
 )
@@ -132,13 +130,15 @@ def register_handlers(
                 "✅ <b>سؤال یا چالش ارسال شد.</b> منتظر پاسخ هم‌بازی‌ات باش.",
                 reply_markup=menu_keyboard(has_active_games=True),
             )
-            await send_game_view(bot, game, user_id)
+            await send_game_view(bot, game, user_id, fresh=True)
             if game.challenge_respondent_id is not None:
-                await send_game_view(bot, game, game.challenge_respondent_id)
-                await notify_turn(
-                    bot,
-                    game.challenge_respondent_id,
-                    "🔔 نوبت توست به سؤال یا چالش پاسخ بدهی!",
+                await send_full_game_text_if_needed(
+                    bot, game.challenge_respondent_id, game,
+                    "سؤال یا چالش", game.challenge_prompt_text,
+                )
+                await send_game_view(
+                    bot, game, game.challenge_respondent_id,
+                    "🎭 نوبت توست به سؤال یا چالش پاسخ بدهی.", fresh=True,
                 )
             return
 
@@ -154,13 +154,12 @@ def register_handlers(
                 f"هم‌بازی‌ات {word_length} فرصت برای حدس دارد.",
                 reply_markup=menu_keyboard(has_active_games=True),
             )
-            await send_game_view(bot, game, user_id)
+            await send_game_view(bot, game, user_id, fresh=True)
             if game.guesser_id is not None:
-                await send_game_view(bot, game, game.guesser_id)
-                await notify_turn(
-                    bot,
-                    game.guesser_id,
+                await send_game_view(
+                    bot, game, game.guesser_id,
                     f"🔔 کلمه آماده شد: {word_length} حرف و {word_length} فرصت حدس داری!",
+                    fresh=True,
                 )
             return
 
@@ -173,32 +172,26 @@ def register_handlers(
             names = await game_names(service, result.game)
             prefix = word_round_result_text(result, names)
             if result.round_finished:
+                result_line = (
+                    "🎯 <b>حدست درست بود!</b>"
+                    if result.guessed_correctly
+                    else "⌛ <b>حدست درست نبود؛ فرصت‌های این دور تمام شد.</b>"
+                )
                 await message.answer(
-                    "✅ <b>دور تمام شد.</b>",
+                    f"{result_line}\n✅ <b>دور تمام شد.</b>",
                     reply_markup=menu_keyboard(has_active_games=True),
                 )
             else:
                 remaining = len(result.secret) - result.game.word_attempts
                 await message.answer(
-                    f"✅ حدست بررسی شد؛ <b>{remaining}</b> فرصت دیگر داری.",
+                    f"❌ <b>حدست درست نبود.</b> بررسی شد؛ "
+                    f"<b>{remaining}</b> فرصت دیگر داری.",
                     reply_markup=menu_keyboard(has_active_games=True),
                 )
-            await send_game_view(bot, result.game, user_id, prefix)
+            await send_game_view(bot, result.game, user_id, prefix, fresh=True)
             opponent_id = result.game.opponent_of(user_id)
             if opponent_id is not None:
-                await send_game_view(bot, result.game, opponent_id, prefix)
-            if result.match_finished and result.game.loser_id is not None:
-                await notify_turn(
-                    bot,
-                    result.game.loser_id,
-                    "🔔 بازی تمام شد؛ نوبت توست جرئت یا حقیقت را انتخاب کنی!",
-                )
-            elif result.round_finished and result.game.hider_id is not None:
-                await notify_turn(
-                    bot,
-                    result.game.hider_id,
-                    "🔔 دور تازه شروع شد؛ نوبت توست کلمهٔ مخفی را انتخاب کنی!",
-                )
+                await send_game_view(bot, result.game, opponent_id, prefix, fresh=True)
             return
 
         if destination_kind == "final_response":
@@ -216,13 +209,18 @@ def register_handlers(
                 reply_markup=menu_keyboard(has_active_games=True),
             )
             if game.winner_id is not None:
-                await safe_send(
-                    bot,
-                    game.winner_id,
-                    f"📩 <b>پاسخ {loser} برای {label}</b>\n\n{escape(text)}\n\n"
-                    "آیا درست انجام شده؟ تأیید تو ۱ امتیاز به او می‌دهد.",
-                    game_keyboard(game, game.winner_id),
+                await send_full_game_text_if_needed(
+                    bot, game.winner_id, game, "پاسخ", game.final_response_text
                 )
+                await send_game_view(
+                    bot,
+                    game,
+                    game.winner_id,
+                    f"📩 <b>پاسخ {loser} برای {label} رسید.</b>\n"
+                    "آیا درست انجام شده؟ تأیید تو ۱ امتیاز به او می‌دهد.",
+                    fresh=True,
+                )
+            await send_game_view(bot, game, user_id, fresh=True)
             return
 
         if destination_kind == "challenge_response":
@@ -236,12 +234,17 @@ def register_handlers(
                 reply_markup=menu_keyboard(has_active_games=True),
             )
             if game.challenge_asker_id is not None:
-                await safe_send(
-                    bot,
-                    game.challenge_asker_id,
-                    f"📩 <b>پاسخ هم‌بازی‌ات:</b>\n\n{escape(text)}\n\nآیا درست انجام شده؟",
-                    game_keyboard(game, game.challenge_asker_id),
+                await send_full_game_text_if_needed(
+                    bot, game.challenge_asker_id, game, "پاسخ", game.challenge_response_text
                 )
+                await send_game_view(
+                    bot,
+                    game,
+                    game.challenge_asker_id,
+                    "📩 <b>پاسخ هم‌بازی‌ات رسید.</b> آیا درست انجام شده؟",
+                    fresh=True,
+                )
+            await send_game_view(bot, game, user_id, fresh=True)
             return
 
         if destination_kind == "final_prompt":
@@ -258,11 +261,16 @@ def register_handlers(
                 reply_markup=menu_keyboard(has_active_games=True),
             )
             if game.loser_id is not None:
-                await safe_send(
-                    bot,
-                    game.loser_id,
-                    f"📨 <b>{winner} برای {label} این پیام را فرستاد:</b>\n\n"
-                    f"{escape(game.final_prompt_text or '')}\n\n"
-                    "جوابت را همینجا برای ربات بفرست تا برای برنده ارسال شود.",
+                await send_full_game_text_if_needed(
+                    bot, game.loser_id, game, "سؤال یا چالش", game.final_prompt_text
                 )
+                await send_game_view(
+                    bot,
+                    game,
+                    game.loser_id,
+                    f"📨 <b>{winner} برای {label} سؤال یا چالش فرستاد.</b>\n"
+                    "جوابت را همینجا برای ربات بفرست تا برای برنده ارسال شود.",
+                    fresh=True,
+                )
+            await send_game_view(bot, game, user_id, fresh=True)
             return

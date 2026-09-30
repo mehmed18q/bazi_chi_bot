@@ -42,7 +42,6 @@ from .shared import (
     QuestionSetup,
     SponsorSetup,
     game_error_text,
-    notify_turn,
     profile_name_text,
     refresh_profile_photo,
     safe_edit,
@@ -90,13 +89,6 @@ def register_handlers(
             GameType.MASTERMIND: "فکر بکر 🎨",
             GameType.TRUTH_OR_DARE: "جرئت یا حقیقت 🎭",
         }[game_type]
-
-    def first_turn_text(game_type: GameType) -> str:
-        if game_type is GameType.WORD_GUESS:
-            return "🔔 بازی شروع شد؛ نوبت توست کلمهٔ مخفی را انتخاب کنی!"
-        if game_type is GameType.MASTERMIND:
-            return "🔔 بازی شروع شد؛ نوبت توست کد چهاررنگ را بسازی!"
-        return "🔔 بازی شروع شد؛ نوبت توست!"
 
     @router.callback_query(F.data == "menu:add_question")
     async def add_question_menu(callback: CallbackQuery, state: FSMContext) -> None:
@@ -420,21 +412,8 @@ def register_handlers(
                     game.creator_id,
                     f"🎉 <b>{escape(persisted_user.display_name)}</b> به بازی پیوست.\n"
                     "بازی شروع شد!",
+                    fresh=True,
                 )
-                first_turn = (
-                    game.next_player_id if game.game_type is GameType.TIC_TAC_TOE else game.hider_id
-                )
-                if (
-                    game.game_type
-                    in {
-                        GameType.TIC_TAC_TOE,
-                        GameType.GOL_YA_POOCH,
-                        GameType.WORD_GUESS,
-                        GameType.MASTERMIND,
-                    }
-                    and first_turn == game.creator_id
-                ):
-                    await notify_turn(bot, game.creator_id, first_turn_text(game.game_type))
                 return
 
         games = await service.active_games(user.telegram_id)
@@ -488,21 +467,8 @@ def register_handlers(
                     game.creator_id,
                     f"🎉 <b>{escape(persisted_joiner.display_name if persisted_joiner else user.display_name)}</b> "
                     "به بازی پیوست.\nبازی شروع شد!",
+                    fresh=True,
                 )
-                first_turn = (
-                    game.next_player_id if game.game_type is GameType.TIC_TAC_TOE else game.hider_id
-                )
-                if (
-                    game.game_type
-                    in {
-                        GameType.TIC_TAC_TOE,
-                        GameType.GOL_YA_POOCH,
-                        GameType.WORD_GUESS,
-                        GameType.MASTERMIND,
-                    }
-                    and first_turn == game.creator_id
-                ):
-                    await notify_turn(bot, game.creator_id, first_turn_text(game.game_type))
             await callback.answer("عضویت تأیید شد! 🎉")
             return
 
@@ -586,7 +552,7 @@ def register_handlers(
             return
         await message.answer(f"🔄 <b>{len(games)} بازی ناتمام</b> پیدا شد.\nوضعیت هر بازی:")
         for game in games:
-            await send_game_view(bot, game, message.from_user.id)
+            await send_game_view(bot, game, message.from_user.id, fresh=True)
 
     @router.message(Command("lastgame"))
     async def last_game_command(message: Message, bot: Bot) -> None:
@@ -788,5 +754,5 @@ def register_handlers(
                 main_menu(callback.from_user.id, True),
             )
             for game in games:
-                await send_game_view(bot, game, callback.from_user.id)
+                await send_game_view(bot, game, callback.from_user.id, fresh=True)
         await callback.answer()
