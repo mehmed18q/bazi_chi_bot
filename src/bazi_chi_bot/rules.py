@@ -1,10 +1,13 @@
 """Shared domain validation; no I/O or framework dependencies."""
 
+import time
 import unicodedata
 from collections.abc import Sequence
 from dataclasses import dataclass
 
+from .daily_schedule import daily_game_open
 from .errors import (
+    DailyChallengeClosed,
     InvalidCell,
     InvalidFinalMessage,
     InvalidWord,
@@ -161,6 +164,10 @@ def evaluate_mastermind_guess(
 def _require_player(game: Game, user_id: int) -> None:
     if not game.has_player(user_id):
         raise NotAPlayer
+    if game.daily_challenge_date is not None and not daily_game_open(
+        game.daily_challenge_date, int(time.time())
+    ):
+        raise DailyChallengeClosed
 
 
 def _require_version(game: Game, expected_version: int) -> None:

@@ -16,7 +16,11 @@ async def reset_history(database: Database) -> dict[str, int]:
     await database.initialize()
     async with database.transaction() as connection:
         counts: dict[str, int] = {}
-        for table in ("question_answers", "challenge_rounds", "score_events", "games", "countdowns"):
+        history_tables = (
+            "daily_notifications", "question_answers", "challenge_rounds",
+            "score_events", "games", "countdowns", "daily_challenges",
+        )
+        for table in history_tables:
             row = await (await connection.execute(f"SELECT count(*) FROM {table}")).fetchone()
             counts[table] = row[0]
 
@@ -25,7 +29,7 @@ async def reset_history(database: Database) -> dict[str, int]:
         # by the schema below before the transaction commits.
         await connection.execute("DROP TRIGGER IF EXISTS score_event_no_delete")
         await connection.execute("DROP TRIGGER IF EXISTS answer_matches_game")
-        for table in ("question_answers", "challenge_rounds", "score_events", "games", "countdowns"):
+        for table in history_tables:
             await connection.execute(f"DELETE FROM {table}")
         await connection.execute(
             """UPDATE user_stats SET games_played = 0, wins = 0, losses = 0,
@@ -46,7 +50,9 @@ async def reset_history(database: Database) -> dict[str, int]:
                END"""
         )
         await connection.execute("DELETE FROM sqlite_sequence WHERE name IN ('games', 'countdowns', 'score_events', 'challenge_rounds', 'question_answers')")
-        row = await (await connection.execute("SELECT count(*) FROM users")).fetchone()
+        row = await (
+            await connection.execute("SELECT count(*) FROM users WHERE telegram_id != -1")
+        ).fetchone()
         counts["users_preserved"] = row[0]
         row = await (await connection.execute("SELECT count(*) FROM questions")).fetchone()
         counts["questions_preserved"] = row[0]

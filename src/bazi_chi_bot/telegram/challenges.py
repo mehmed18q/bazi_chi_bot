@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+from datetime import date
 from html import escape
 
 from aiogram import Bot, F, Router
 from aiogram.types import Message
 
 from ..game import (
+    DailyChallengeClosed,
     GameError,
     GameService,
 )
@@ -32,6 +34,15 @@ def register_handlers(
 ) -> None:
     presenter = GamePresenter(service)
     send_game_view = presenter.send_game_view
+
+    async def show_closed_daily_game(game: Game, user_id: int, bot: Bot) -> None:
+        if game.daily_challenge_date is None:
+            return
+        await service.daily.close_day(date.fromisoformat(game.daily_challenge_date))
+        await send_game_view(
+            bot, await service.get_game(game.id), user_id,
+            "🏁 زمان چالش امروز تمام شد.", fresh=True,
+        )
 
     @router.message(F.text | F.caption)
     async def final_text_message(message: Message, bot: Bot) -> None:
@@ -147,15 +158,23 @@ def register_handlers(
                 game = await service.choose_word(destination_game.id, user_id, text)
             except GameError as error:
                 await message.answer(game_error_text(error))
+                if isinstance(error, DailyChallengeClosed):
+                    await show_closed_daily_game(destination_game, user_id, bot)
                 return
             word_length = len(game.word_secret or "")
+            if game.is_solo:
+                advance = await service.advance_bot(game.id)
+                game = advance.game
             await message.answer(
                 f"✅ <b>کلمهٔ {word_length} حرفی ثبت شد.</b>\n"
-                f"هم‌بازی‌ات {word_length} فرصت برای حدس دارد.",
+                + (
+                    "\n".join(advance.messages[-8:])
+                    if game.is_solo else f"هم‌بازی‌ات {word_length} فرصت برای حدس دارد."
+                ),
                 reply_markup=menu_keyboard(has_active_games=True),
             )
             await send_game_view(bot, game, user_id, fresh=True)
-            if game.guesser_id is not None:
+            if game.guesser_id is not None and not game.is_solo:
                 await send_game_view(
                     bot, game, game.guesser_id,
                     f"🔔 کلمه آماده شد: {word_length} حرف و {word_length} فرصت حدس داری!",
@@ -168,9 +187,17 @@ def register_handlers(
                 result = await service.guess_word(destination_game.id, user_id, text)
             except GameError as error:
                 await message.answer(game_error_text(error))
+                if isinstance(error, DailyChallengeClosed):
+                    await show_closed_daily_game(destination_game, user_id, bot)
                 return
             names = await game_names(service, result.game)
             prefix = word_round_result_text(result, names)
+            game = result.game
+            if game.is_solo:
+                advance = await service.advance_bot(game.id)
+                game = advance.game
+                if advance.messages:
+                    prefix += "\n\n" + "\n".join(advance.messages[-8:])
             if result.round_finished:
                 result_line = (
                     "🎯 <b>حدست درست بود!</b>"
@@ -188,9 +215,9 @@ def register_handlers(
                     f"<b>{remaining}</b> فرصت دیگر داری.",
                     reply_markup=menu_keyboard(has_active_games=True),
                 )
-            await send_game_view(bot, result.game, user_id, prefix, fresh=True)
-            opponent_id = result.game.opponent_of(user_id)
-            if opponent_id is not None:
+            await send_game_view(bot, game, user_id, prefix, fresh=True)
+            opponent_id = game.opponent_of(user_id)
+            if opponent_id is not None and not game.is_solo:
                 await send_game_view(bot, result.game, opponent_id, prefix, fresh=True)
             return
 

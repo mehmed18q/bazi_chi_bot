@@ -582,16 +582,6 @@ def register_handlers(
         )
         await callback.answer()
 
-    @router.callback_query(F.data == "menu:daily_challenge")
-    async def daily_challenge_soon(callback: CallbackQuery) -> None:
-        await safe_edit(
-            callback,
-            "🎯 <b>چالش روزانه</b>\n\n"
-            "این بخش به‌زودی راه‌اندازی می‌شود؛ هر روز یک چالش تازه برایت آماده خواهد بود. ⏳",
-            main_menu(callback.from_user.id),
-        )
-        await callback.answer("به‌زودی فعال می‌شود ⏳")
-
     @router.callback_query(F.data == "noop")
     async def noop(callback: CallbackQuery) -> None:
         await callback.answer()
@@ -754,5 +744,10 @@ def register_handlers(
                 main_menu(callback.from_user.id, True),
             )
             for game in games:
-                await send_game_view(bot, game, callback.from_user.id, fresh=True)
+                prefix = None
+                if game.is_solo:
+                    advance = await service.advance_bot(game.id)
+                    game = advance.game
+                    prefix = "\n".join(advance.messages[-8:]) or None
+                await send_game_view(bot, game, callback.from_user.id, prefix, fresh=True)
         await callback.answer()

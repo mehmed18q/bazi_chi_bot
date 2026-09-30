@@ -15,6 +15,8 @@ from aiogram.types import User as TelegramUser
 
 from ..game import (
     CannotJoinOwnGame,
+    DailyChallengeClosed,
+    DailyChallengeRequiresActivation,
     GameError,
     GameNotFound,
     GameService,
@@ -72,6 +74,8 @@ ERROR_MESSAGES: dict[type[GameError], str] = {
     InviteUnavailable: "این لینک قبلاً استفاده شده یا بازی دیگر قابل ورود نیست. ⏳",
     NotAPlayer: "تو بازیکن این مسابقه نیستی. 🚫",
     NotYourTurn: "الان نوبت تو نیست؛ کمی صبر کن. ⏳",
+    DailyChallengeClosed: "زمان چالش امروز تمام شده؛ فردا دوباره امتحان کن. ⏰",
+    DailyChallengeRequiresActivation: "برای شرکت در چالش روزانه باید هزینهٔ فعال‌سازی را پرداخت و حساب را فعال کنی. 🔒",
     InvalidFist: "شمارهٔ مشت معتبر نیست. 🤔",
     InvalidCell: "این خانه پر است یا انتخابت معتبر نیست؛ یک خانهٔ خالی را بزن. ❌⭕",
     InvalidWord: "کلمه باید بدون فاصله، فقط شامل حروف و بین ۲ تا ۲۰ حرف باشد. 🔤",

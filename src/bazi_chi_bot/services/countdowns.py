@@ -4,7 +4,9 @@ import time
 
 import aiosqlite
 
+from ..daily_schedule import next_reminder_at
 from ..db import Database
+from ..errors import DailyChallengeRequiresActivation
 from ..models import Countdown, CountdownStatus, User
 from ..persistence.mappers import _user_from_row
 from ..scheduling import next_delivery_at
@@ -37,6 +39,7 @@ def _countdown_from_row(row: aiosqlite.Row) -> Countdown:
         created_at=row["created_at"],
         last_sent_at=row["last_sent_at"],
         completed_at=row["completed_at"],
+        kind=row["kind"],
     )
 
 
@@ -66,7 +69,8 @@ class CountdownService:
                     return None
                 row = await (
                     await connection.execute(
-                        "SELECT * FROM users WHERE telegram_id = ?", (telegram_id,)
+                        "SELECT * FROM users WHERE telegram_id = ? AND telegram_id != -1",
+                        (telegram_id,),
                     )
                 ).fetchone()
         if row is None:
@@ -79,7 +83,7 @@ class CountdownService:
             rows = await (
                 await connection.execute(
                     """
-                    SELECT * FROM users
+                    SELECT * FROM users WHERE telegram_id != -1
                     ORDER BY COALESCE(nickname, display_name) COLLATE NOCASE, telegram_id
                     """
                 )
@@ -101,7 +105,8 @@ class CountdownService:
         async with self.database.transaction() as connection:
             target = await (
                 await connection.execute(
-                    "SELECT 1 FROM users WHERE telegram_id = ?", (target_user_id,)
+                    "SELECT 1 FROM users WHERE telegram_id = ? AND telegram_id != -1",
+                    (target_user_id,),
                 )
             ).fetchone()
             if target is None:
@@ -111,7 +116,7 @@ class CountdownService:
                 """
                 UPDATE countdowns
                 SET status = 'cancelled'
-                WHERE target_user_id = ? AND status = 'active'
+                WHERE target_user_id = ? AND status = 'active' AND kind = 'standard'
                 """,
                 (target_user_id,),
             )
@@ -152,7 +157,7 @@ class CountdownService:
             cursor = await connection.execute(
                 """
                 UPDATE countdowns SET next_run_at = ?
-                WHERE status = 'active'
+                WHERE status = 'active' AND kind = 'standard'
                 """,
                 (current_time,),
             )
@@ -165,7 +170,7 @@ class CountdownService:
                 """
                 UPDATE countdowns
                 SET last_sent_at = ?, next_run_at = ?
-                WHERE id = ? AND status = 'active'
+                WHERE id = ? AND status = 'active' AND kind = 'standard'
                 """,
                 (sent_at, next_run, countdown_id),
             )
@@ -196,7 +201,7 @@ class CountdownService:
             cursor = await connection.execute(
                 """
                 UPDATE countdowns SET status = 'cancelled'
-                WHERE target_user_id = ? AND status = 'active'
+                WHERE target_user_id = ? AND status = 'active' AND kind = 'standard'
                 """,
                 (target_user_id,),
             )
@@ -208,10 +213,77 @@ class CountdownService:
                 await connection.execute(
                     """
                     SELECT * FROM countdowns
-                    WHERE creator_id = ? AND status = 'active'
+                    WHERE creator_id = ? AND status = 'active' AND kind = 'standard'
                     ORDER BY target_at, id
                     """,
                     (creator_id,),
                 )
             ).fetchall()
         return [_countdown_from_row(row) for row in rows]
+
+    async def daily_reminder(self, user_id: int) -> Countdown | None:
+        async with self.database.connect() as connection:
+            row = await (
+                await connection.execute(
+                    """
+                    SELECT * FROM countdowns
+                    WHERE target_user_id = ? AND kind = 'daily_reminder' AND status = 'active'
+                    """,
+                    (user_id,),
+                )
+            ).fetchone()
+        return _countdown_from_row(row) if row else None
+
+    async def subscribe_daily_reminder(self, user_id: int, *, now: int | None = None) -> Countdown:
+        current = int(time.time()) if now is None else now
+        target = next_reminder_at(current)
+        async with self.database.transaction() as connection:
+            user = await (
+                await connection.execute(
+                    "SELECT is_activated FROM users WHERE telegram_id = ?", (user_id,)
+                )
+            ).fetchone()
+            if user is None or not user["is_activated"]:
+                raise DailyChallengeRequiresActivation
+            await connection.execute(
+                """
+                INSERT OR IGNORE INTO countdowns (
+                    creator_id, target_user_id, target_at, next_run_at, status,
+                    created_at, kind
+                ) VALUES (?, ?, ?, ?, 'active', ?, 'daily_reminder')
+                """,
+                (user_id, user_id, target, target, current),
+            )
+            row = await (
+                await connection.execute(
+                    """
+                    SELECT * FROM countdowns
+                    WHERE target_user_id = ? AND kind = 'daily_reminder' AND status = 'active'
+                    """,
+                    (user_id,),
+                )
+            ).fetchone()
+        return _countdown_from_row(row)
+
+    async def cancel_daily_reminder(self, user_id: int) -> bool:
+        async with self.database.transaction() as connection:
+            cursor = await connection.execute(
+                """
+                UPDATE countdowns SET status = 'cancelled'
+                WHERE target_user_id = ? AND kind = 'daily_reminder' AND status = 'active'
+                """,
+                (user_id,),
+            )
+        return cursor.rowcount > 0
+
+    async def record_daily_reminder_sent(self, countdown_id: int, sent_at: int) -> None:
+        target = next_reminder_at(sent_at)
+        async with self.database.transaction() as connection:
+            await connection.execute(
+                """
+                UPDATE countdowns
+                SET last_sent_at = ?, target_at = ?, next_run_at = ?
+                WHERE id = ? AND status = 'active' AND kind = 'daily_reminder'
+                """,
+                (sent_at, target, target, countdown_id),
+            )

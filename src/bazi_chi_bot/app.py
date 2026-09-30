@@ -29,6 +29,7 @@ from .db import Database
 from .game import GameService
 from .handlers import build_router
 from .telegram.sponsors import deactivate_invalid_sponsors
+from .telegram.daily_worker import DailyChallengeWorker
 
 logger = logging.getLogger(__name__)
 
@@ -202,6 +203,7 @@ async def _serve_connection(
         bot,
         timezone_name=countdown_timezone,
     )
+    daily_worker = DailyChallengeWorker(service.daily, bot)
     dispatcher.include_router(
         build_router(
             service,
@@ -213,6 +215,7 @@ async def _serve_connection(
         )
     )
     scheduler_task: asyncio.Task[None] | None = None
+    daily_task: asyncio.Task[None] | None = None
 
     try:
         logger.info(
@@ -237,8 +240,11 @@ async def _serve_connection(
             countdown_scheduler.run(),
             name="countdown-scheduler",
         )
+        daily_task = asyncio.create_task(daily_worker.run(), name="daily-challenge-worker")
         await _poll_with_connection_monitor(dispatcher, bot)
     finally:
+        if daily_task is not None:
+            await stop_scheduler(daily_task)
         if scheduler_task is not None:
             await stop_scheduler(scheduler_task)
 

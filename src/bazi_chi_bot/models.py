@@ -173,6 +173,8 @@ class Game:
     mastermind_attempts: int = 0
     mastermind_guesses: tuple[MastermindGuess, ...] = ()
     mastermind_draft: tuple[str, ...] = ()
+    is_solo: bool = False
+    daily_challenge_date: str | None = None
 
     def score_for(self, user_id: int) -> int:
         if user_id == self.creator_id:
@@ -256,3 +258,16 @@ class Countdown:
     created_at: int
     last_sent_at: int | None
     completed_at: int | None
+    kind: str = "standard"
+
+
+@dataclass(frozen=True, slots=True)
+class DailyChallenge:
+    challenge_date: str
+    starts_at: int
+    ends_at: int
+    game_type: GameType
+    fists: int
+    total_hands: int
+    bot_starts: bool
+    secrets: tuple[object, ...]

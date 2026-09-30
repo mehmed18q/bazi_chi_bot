@@ -190,16 +190,35 @@ def admin_user_actions(user_id: int, is_activated: bool) -> InlineKeyboardMarkup
     return builder.as_markup()
 
 
-def game_types_keyboard() -> InlineKeyboardMarkup:
+def game_types_keyboard(solo: bool = False) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
-    builder.button(text="🌸 گل یا پوچ", callback_data="setup:type:gol")
-    builder.button(text="❌⭕ دوز سه‌تایی", callback_data="setup:type:ttt")
-    builder.button(text="🔤 حدس کلمه", callback_data="setup:type:word")
-    builder.button(text="🎨 فکر بکر", callback_data="setup:type:mastermind")
-    builder.button(text="🎭 جرئت یا حقیقت", callback_data="setup:type:tod")
-    builder.button(text="🎲 بازی شانسی", callback_data="setup:type:random")
+    prefix = "setup:solo:type:" if solo else "setup:type:"
+    builder.button(text="🌸 گل یا پوچ", callback_data=f"{prefix}gol")
+    builder.button(text="❌⭕ دوز سه‌تایی", callback_data=f"{prefix}ttt")
+    builder.button(text="🔤 حدس کلمه", callback_data=f"{prefix}word")
+    builder.button(text="🎨 فکر بکر", callback_data=f"{prefix}mastermind")
+    if not solo:
+        builder.button(text="🎭 جرئت یا حقیقت", callback_data="setup:type:tod")
+    builder.button(text="🎲 بازی شانسی", callback_data=f"{prefix}random")
+    if not solo:
+        builder.button(text="🤖 بازی تک‌نفره با ربات", callback_data="setup:solo")
     builder.button(text="🏠 منوی اصلی", callback_data="menu:home")
     builder.adjust(2, 2, 1, 1, 1)
+    return builder.as_markup()
+
+
+def daily_challenge_keyboard(
+    *, open_now: bool, reminder_enabled: bool, can_play: bool = True
+) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    if open_now and can_play:
+        builder.button(text="🎮 ورود به چالش امروز", callback_data="daily:play")
+    builder.button(
+        text="🔕 لغو یادآور روزانه" if reminder_enabled else "🔔 فعال‌کردن یادآور روزانه",
+        callback_data="daily:reminder:off" if reminder_enabled else "daily:reminder:on",
+    )
+    builder.button(text="🏠 منوی اصلی", callback_data="menu:home")
+    builder.adjust(1)
     return builder.as_markup()
 
 
@@ -208,19 +227,22 @@ def board_text(board: str) -> str:
     return "\n".join(" ".join(symbols[c] for c in board[i : i + 3]) for i in (0, 3, 6))
 
 
-def fists_keyboard() -> InlineKeyboardMarkup:
+def fists_keyboard(solo: bool = False) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     for fists in range(2, 7):
-        builder.button(text=f"{fists} مشت ✊", callback_data=f"setup:f:{fists}")
+        builder.button(text=f"{fists} مشت ✊", callback_data=f"setup:solo:f:{fists}" if solo else f"setup:f:{fists}")
     builder.button(text="🏠 منوی اصلی", callback_data="menu:home")
     builder.adjust(2, 2, 1, 1)
     return builder.as_markup()
 
 
-def hands_keyboard(fists: int, game_type: GameType = GameType.GOL_YA_POOCH) -> InlineKeyboardMarkup:
+def hands_keyboard(
+    fists: int, game_type: GameType = GameType.GOL_YA_POOCH, solo: bool = False
+) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     for hands in (3, 5, 7, 9):
         callback = (
+            f"setup:solo:play:{game_type.value}:{fists}:{hands}" if solo else
             f"setup:ttt:{hands}"
             if game_type is GameType.TIC_TAC_TOE
             else (

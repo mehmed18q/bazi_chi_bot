@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import date
 from html import escape
 from secrets import choice
 
@@ -9,6 +10,7 @@ from aiogram import Bot, F, Router
 from aiogram.types import CallbackQuery
 
 from ..game import (
+    DailyChallengeClosed,
     GameError,
     GameService,
     InvalidFinalChoice,
@@ -27,13 +29,12 @@ from .shared import (
     final_choice_label,
     game_error_text,
     game_names,
-    round_result_text,
     mastermind_round_result_text,
+    round_result_text,
     safe_edit,
     send_full_game_text_if_needed,
     telegram_user,
 )
-
 
 GAME_SETUP: dict[GameType, tuple[str, str, int]] = {
     GameType.GOL_YA_POOCH: (
@@ -80,14 +81,30 @@ def register_handlers(
     send_game_view = presenter.send_game_view
     edit_game_view = presenter.edit_game_view
 
-    async def show_setup(callback: CallbackQuery, game_type: GameType, *, random: bool = False) -> None:
+    async def after_human_turn(game, prefix: str | None):
+        if not game.is_solo:
+            return game, prefix
+        advance = await service.advance_bot(game.id)
+        if advance.messages:
+            bot_text = "\n".join(advance.messages[-8:])
+            prefix = f"{prefix}\n\n{bot_text}" if prefix else bot_text
+        return advance.game, prefix
+
+    async def show_setup(
+        callback: CallbackQuery, game_type: GameType, *, random: bool = False, solo: bool = False
+    ) -> None:
         name, text, fists = GAME_SETUP[game_type]
+        if solo and game_type is GameType.TIC_TAC_TOE:
+            text = (
+                "❌⭕ <b>دوز با ربات</b>\n\nچند دست بازی کنیم؟\n"
+                "در حالت تک‌نفره دست مساوی هم جزو دست‌ها حساب می‌شود."
+            )
         if random:
             text = f"🎲 <b>بازی شانسی: {name}</b>\n\n{text}"
         keyboard = (
-            fists_keyboard()
+            fists_keyboard(solo=solo)
             if game_type is GameType.GOL_YA_POOCH
-            else hands_keyboard(fists, game_type)
+            else hands_keyboard(fists, game_type, solo=solo)
         )
         await safe_edit(callback, text, keyboard)
         await callback.answer()
@@ -106,6 +123,65 @@ def register_handlers(
     @router.callback_query(F.data == "setup:type:random")
     async def setup_random(callback: CallbackQuery) -> None:
         await show_setup(callback, choice(tuple(GameType)), random=True)
+
+    @router.callback_query(F.data == "setup:solo")
+    async def setup_solo(callback: CallbackQuery) -> None:
+        await safe_edit(
+            callback,
+            "🤖 <b>بازی تک‌نفره با ربات</b>\n\n"
+            "یکی از چهار بازی را انتخاب کن. جرئت یا حقیقت در این حالت اجرا نمی‌شود. "
+            "اگر ربات را شکست بدهی، یک امتیاز می‌گیری.",
+            game_types_keyboard(solo=True),
+        )
+        await callback.answer()
+
+    @router.callback_query(F.data.startswith("setup:solo:type:"))
+    async def setup_solo_type(callback: CallbackQuery) -> None:
+        key = (callback.data or "").rsplit(":", 1)[-1]
+        types = {
+            "gol": GameType.GOL_YA_POOCH,
+            "ttt": GameType.TIC_TAC_TOE,
+            "word": GameType.WORD_GUESS,
+            "mastermind": GameType.MASTERMIND,
+        }
+        if key == "random":
+            await show_setup(callback, choice(tuple(types.values())), random=True, solo=True)
+        elif key in types:
+            await show_setup(callback, types[key], solo=True)
+        else:
+            await callback.answer("بازی نامعتبر است.", show_alert=True)
+
+    @router.callback_query(F.data.startswith("setup:solo:f:"))
+    async def setup_solo_fists(callback: CallbackQuery) -> None:
+        try:
+            fists = int((callback.data or "").rsplit(":", 1)[-1])
+            if fists not in range(2, 7):
+                raise ValueError
+        except ValueError:
+            await callback.answer("تعداد مشت معتبر نیست.", show_alert=True)
+            return
+        await safe_edit(
+            callback, f"🤖 {fists} مشت انتخاب شد. چند دست با ربات بازی کنیم؟",
+            hands_keyboard(fists, solo=True),
+        )
+        await callback.answer()
+
+    @router.callback_query(F.data.startswith("setup:solo:play:"))
+    async def start_solo(callback: CallbackQuery, bot: Bot) -> None:
+        try:
+            _, _, _, type_text, fists_text, hands_text = (callback.data or "").split(":")
+            await service.save_user(telegram_user(callback.from_user))
+            advance = await service.create_solo_game(
+                callback.from_user.id, int(fists_text), int(hands_text), GameType(type_text)
+            )
+        except (ValueError, GameError):
+            await callback.answer("تنظیمات بازی معتبر نیست.", show_alert=True)
+            return
+        prefix = "🤖 <b>بازی با ربات شروع شد!</b>"
+        if advance.messages:
+            prefix += "\n" + "\n".join(advance.messages[-4:])
+        await edit_game_view(callback, bot, advance.game, prefix, fresh=True)
+        await callback.answer("بازی شروع شد ✅")
 
     @router.callback_query(F.data == "setup:type:ttt")
     async def setup_tic_tac_toe(callback: CallbackQuery) -> None:
@@ -231,14 +307,16 @@ def register_handlers(
                         else "🤝 مساوی شد؛ این دست بدون امتیاز دوباره بازی می‌شود."
                     )
                     prefix = f"{outcome}\n\n{board_text(result.board)}"
-                await edit_game_view(callback, bot, result.game, prefix, fresh=True)
-                opponent_id = result.game.opponent_of(callback.from_user.id)
-                if opponent_id is not None:
+                game, prefix = await after_human_turn(result.game, prefix)
+                await edit_game_view(callback, bot, game, prefix, fresh=True)
+                opponent_id = game.opponent_of(callback.from_user.id)
+                if opponent_id is not None and not game.is_solo:
                     await send_game_view(bot, result.game, opponent_id, prefix, fresh=True)
             elif action == "hide":
                 game = await service.hide_fist(game_id, callback.from_user.id, int(value), version)
-                await edit_game_view(callback, bot, game, "✅ انتخابت ثبت شد.", fresh=True)
-                if game.guesser_id is not None:
+                game, prefix = await after_human_turn(game, "✅ انتخابت ثبت شد.")
+                await edit_game_view(callback, bot, game, prefix, fresh=True)
+                if game.guesser_id is not None and not game.is_solo:
                     await send_game_view(
                         bot, game, game.guesser_id, "🌸 گل پنهان شد؛ حالا نوبت حدس توست!",
                         fresh=True,
@@ -249,9 +327,10 @@ def register_handlers(
                 )
                 names = await game_names(service, result.game)
                 prefix = round_result_text(result, names)
-                await edit_game_view(callback, bot, result.game, prefix, fresh=True)
-                opponent_id = result.game.opponent_of(callback.from_user.id)
-                if opponent_id is not None:
+                game, prefix = await after_human_turn(result.game, prefix)
+                await edit_game_view(callback, bot, game, prefix, fresh=True)
+                opponent_id = game.opponent_of(callback.from_user.id)
+                if opponent_id is not None and not game.is_solo:
                     await send_game_view(bot, result.game, opponent_id, prefix, fresh=True)
             elif action == "mastermind":
                 if value == "reset":
@@ -267,8 +346,9 @@ def register_handlers(
                     if not selection.complete:
                         await edit_game_view(callback, bot, game)
                     elif selection.result is None:
-                        await edit_game_view(callback, bot, game, "✅ کد مخفی ثبت شد.", fresh=True)
-                        if game.guesser_id is not None:
+                        game, prefix = await after_human_turn(game, "✅ کد مخفی ثبت شد.")
+                        await edit_game_view(callback, bot, game, prefix, fresh=True)
+                        if game.guesser_id is not None and not game.is_solo:
                             await send_game_view(
                                 bot, game, game.guesser_id,
                                 "🎨 کد آماده شد؛ حالا رنگ‌ها را حدس بزن!",
@@ -278,9 +358,10 @@ def register_handlers(
                         result = selection.result
                         names = await game_names(service, result.game)
                         prefix = mastermind_round_result_text(result, names)
-                        await edit_game_view(callback, bot, result.game, prefix, fresh=True)
-                        opponent_id = result.game.opponent_of(callback.from_user.id)
-                        if opponent_id is not None:
+                        game, prefix = await after_human_turn(result.game, prefix)
+                        await edit_game_view(callback, bot, game, prefix, fresh=True)
+                        opponent_id = game.opponent_of(callback.from_user.id)
+                        if opponent_id is not None and not game.is_solo:
                             await send_game_view(bot, result.game, opponent_id, prefix, fresh=True)
             elif action == "final":
                 game = await service.choose_final(game_id, callback.from_user.id, value, version)
@@ -391,6 +472,17 @@ def register_handlers(
         except (ValueError, GameError) as error:
             game_error = error if isinstance(error, GameError) else InvalidFist()
             await callback.answer(game_error_text(game_error), show_alert=True)
+            if isinstance(game_error, DailyChallengeClosed):
+                try:
+                    current = await service.get_game(game_id)
+                    if current.daily_challenge_date and current.has_player(callback.from_user.id):
+                        await service.daily.close_day(date.fromisoformat(current.daily_challenge_date))
+                        current = await service.get_game(game_id)
+                        await edit_game_view(
+                            callback, bot, current, "🏁 زمان چالش امروز تمام شد.", fresh=True
+                        )
+                except GameError:
+                    pass
             if isinstance(game_error, StaleAction):
                 try:
                     current = await service.get_game(game_id)

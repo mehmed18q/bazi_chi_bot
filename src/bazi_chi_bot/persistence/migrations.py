@@ -746,4 +746,102 @@ MIGRATIONS: tuple[str, ...] = (
     WHERE id IS NULL;
     DROP TABLE missing_payment_ids;
     """,
+    """
+    -- Solo matches have a durable mode flag so old two-player matches keep
+    -- their original rules. The virtual user is created only when needed.
+    ALTER TABLE games ADD COLUMN is_solo INTEGER NOT NULL DEFAULT 0
+        CHECK (is_solo IN (0, 1));
+    INSERT INTO score_events (user_id, reason, amount, created_at)
+        SELECT telegram_id, 'legacy', points_won, unixepoch() FROM user_stats
+        WHERE points_won > 0 AND NOT EXISTS (
+            SELECT 1 FROM score_events s WHERE s.user_id = user_stats.telegram_id
+        );
+    UPDATE user_stats SET points_won = (
+        SELECT COALESCE(SUM(amount), 0) FROM score_events s
+        WHERE s.user_id = user_stats.telegram_id
+    );
+    CREATE TEMP TABLE solo_migration_missing_ids (
+        user_rowid INTEGER PRIMARY KEY, new_id INTEGER NOT NULL
+    );
+    INSERT INTO solo_migration_missing_ids (user_rowid, new_id)
+        SELECT rowid,
+               (SELECT COALESCE(MAX(id), 0) FROM users)
+                   + ROW_NUMBER() OVER (ORDER BY rowid)
+        FROM users WHERE id IS NULL;
+    UPDATE users SET id = (
+        SELECT new_id FROM solo_migration_missing_ids
+        WHERE user_rowid = users.rowid
+    ) WHERE id IS NULL;
+    DROP TABLE solo_migration_missing_ids;
+    """,
+    """
+    -- One shared challenge specification and one attempt per person/day.
+    CREATE TABLE daily_challenges (
+        challenge_date TEXT PRIMARY KEY,
+        starts_at INTEGER NOT NULL,
+        ends_at INTEGER NOT NULL,
+        game_type TEXT NOT NULL CHECK (game_type IN
+            ('gol_ya_pooch', 'tic_tac_toe', 'word_guess', 'mastermind')),
+        fists INTEGER NOT NULL,
+        total_hands INTEGER NOT NULL,
+        bot_starts INTEGER NOT NULL CHECK (bot_starts IN (0, 1)),
+        secrets_json TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        end_queued_at INTEGER,
+        CHECK (ends_at > starts_at)
+    );
+    ALTER TABLE games ADD COLUMN daily_challenge_date TEXT
+        REFERENCES daily_challenges(challenge_date);
+    CREATE UNIQUE INDEX idx_games_daily_attempt
+        ON games(daily_challenge_date, creator_id)
+        WHERE daily_challenge_date IS NOT NULL;
+    CREATE INDEX idx_games_daily_result
+        ON games(daily_challenge_date, creator_id, status, winner_id);
+
+    CREATE TABLE daily_notifications (
+        challenge_date TEXT NOT NULL REFERENCES daily_challenges(challenge_date),
+        user_id INTEGER NOT NULL REFERENCES users(telegram_id),
+        event TEXT NOT NULL CHECK (event IN ('start', 'end')),
+        delivered_at INTEGER,
+        PRIMARY KEY (challenge_date, user_id, event)
+    );
+    CREATE INDEX idx_daily_notifications_pending
+        ON daily_notifications(event, delivered_at, challenge_date);
+
+    -- Reuse the countdown delivery queue for opt-in daily reminders without
+    -- replacing an admin-created countdown for the same person.
+    ALTER TABLE countdowns ADD COLUMN kind TEXT NOT NULL DEFAULT 'standard'
+        CHECK (kind IN ('standard', 'daily_reminder'));
+    DROP INDEX idx_countdowns_one_active_per_target;
+    CREATE UNIQUE INDEX idx_countdowns_one_active_per_target
+        ON countdowns(target_user_id)
+        WHERE status = 'active' AND kind = 'standard';
+    CREATE UNIQUE INDEX idx_countdowns_one_daily_reminder
+        ON countdowns(target_user_id)
+        WHERE status = 'active' AND kind = 'daily_reminder';
+
+    -- Preserve aggregate-only balances/users inserted into schema 24.
+    INSERT INTO score_events (user_id, reason, amount, created_at)
+        SELECT telegram_id, 'legacy', points_won, unixepoch() FROM user_stats
+        WHERE points_won > 0 AND NOT EXISTS (
+            SELECT 1 FROM score_events s WHERE s.user_id = user_stats.telegram_id
+        );
+    UPDATE user_stats SET points_won = (
+        SELECT COALESCE(SUM(amount), 0) FROM score_events s
+        WHERE s.user_id = user_stats.telegram_id
+    );
+    CREATE TEMP TABLE daily_migration_missing_ids (
+        user_rowid INTEGER PRIMARY KEY, new_id INTEGER NOT NULL
+    );
+    INSERT INTO daily_migration_missing_ids (user_rowid, new_id)
+        SELECT rowid,
+               (SELECT COALESCE(MAX(id), 0) FROM users)
+                   + ROW_NUMBER() OVER (ORDER BY rowid)
+        FROM users WHERE id IS NULL;
+    UPDATE users SET id = (
+        SELECT new_id FROM daily_migration_missing_ids
+        WHERE user_rowid = users.rowid
+    ) WHERE id IS NULL;
+    DROP TABLE daily_migration_missing_ids;
+    """,
 )

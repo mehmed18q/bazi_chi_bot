@@ -12,7 +12,7 @@ from ..countdown import (
 from ..game import (
     GameService,
 )
-from . import challenges, countdowns, gameplay, menus, payments
+from . import challenges, countdowns, daily, gameplay, menus, payments
 from .payments import PaymentAccessMiddleware
 from .sponsors import SponsorMembershipMiddleware
 
@@ -44,6 +44,7 @@ def build_router(
         reviewer_ids=payment_reviewer_ids,
     )
     menus.register_handlers(router, service, countdown_admin_ids=admin_ids)
+    daily.register_handlers(router, service, countdown_service, countdown_scheduler)
     countdowns.register_handlers(
         router,
         service,

@@ -7,7 +7,12 @@ import time
 from contextlib import suppress
 
 from aiogram import Bot
-from aiogram.exceptions import TelegramAPIError, TelegramForbiddenError, TelegramRetryAfter
+from aiogram.exceptions import (
+    TelegramAPIError,
+    TelegramBadRequest,
+    TelegramForbiddenError,
+    TelegramRetryAfter,
+)
 
 from ..models import Countdown
 from ..scheduling import FINAL_COUNTDOWN_TEXT, countdown_message
@@ -61,9 +66,25 @@ class CountdownScheduler:
             await self._deliver(countdown, now)
 
     async def _deliver(self, countdown: Countdown, now: int) -> None:
-        finished = now >= countdown.target_at
+        daily_reminder = countdown.kind == "daily_reminder"
+        if daily_reminder:
+            user = await self.service.resolve_user(str(countdown.target_user_id))
+            if user is None or not user.is_activated:
+                await self.service.cancel_daily_reminder(countdown.target_user_id)
+                return
+        if daily_reminder and now >= countdown.target_at + 5 * 60:
+            # Never send yesterday's reminder after a restart or long outage.
+            await self.service.record_daily_reminder_sent(countdown.id, now)
+            return
+        finished = not daily_reminder and now >= countdown.target_at
+        reminder_minutes = str(
+            max(1, math.ceil((countdown.target_at + 300 - now) / 60))
+        ).translate(str.maketrans("0123456789", "۰۱۲۳۴۵۶۷۸۹"))
         text = (
-            FINAL_COUNTDOWN_TEXT
+            f"⏰ <b>{reminder_minutes} "
+            "دقیقه تا چالش روزانه!</b>\nآماده باش؛ بازی ساعت ۱۲ شروع می‌شود. 🎯"
+            if daily_reminder
+            else FINAL_COUNTDOWN_TEXT
             if finished
             else countdown_message(
                 countdown.target_at - now,
@@ -77,7 +98,16 @@ class CountdownScheduler:
             logger.warning(
                 "Countdown recipient %s blocked or stopped the bot", countdown.target_user_id
             )
-            await self.service.cancel_for_target(countdown.target_user_id)
+            if daily_reminder:
+                await self.service.cancel_daily_reminder(countdown.target_user_id)
+            else:
+                await self.service.cancel_for_target(countdown.target_user_id)
+        except TelegramBadRequest as error:
+            logger.warning("Invalid countdown recipient %s: %s", countdown.target_user_id, error)
+            if daily_reminder:
+                await self.service.cancel_daily_reminder(countdown.target_user_id)
+            else:
+                await self.service.cancel_for_target(countdown.target_user_id)
         except TelegramRetryAfter as error:
             retry_after = max(1, math.ceil(error.retry_after))
             logger.warning("Countdown rate limited; retrying in %s seconds", retry_after)
@@ -87,7 +117,9 @@ class CountdownScheduler:
             retry_at = now + 30 if finished else min(countdown.target_at, now + 30)
             await self.service.retry_at(countdown.id, retry_at)
         else:
-            if finished:
+            if daily_reminder:
+                await self.service.record_daily_reminder_sent(countdown.id, now)
+            elif finished:
                 await self.service.complete(countdown.id, now)
             else:
                 await self.service.record_sent(countdown.id, now, countdown.target_at)

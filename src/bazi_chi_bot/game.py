@@ -7,6 +7,8 @@ from collections.abc import Callable, Sequence
 
 from .db import Database
 from .errors import CannotJoinOwnGame as CannotJoinOwnGame
+from .errors import DailyChallengeClosed as DailyChallengeClosed
+from .errors import DailyChallengeRequiresActivation as DailyChallengeRequiresActivation
 from .errors import GameError as GameError
 from .errors import GameNotFound as GameNotFound
 from .errors import InvalidCell as InvalidCell
@@ -40,7 +42,9 @@ from .models import (
 from .persistence.games import GameRepository
 from .persistence.sponsors import Sponsor, SponsorRepository
 from .services.challenges import ChallengeService
+from .services.daily_challenges import DailyChallengeService
 from .services.matches import MatchService
+from .services.solo import BotAdvance, SoloOpponent
 from .services.payments import PaymentService
 from .services.users import UserService
 
@@ -59,6 +63,8 @@ class GameService:
         self.payments = PaymentService(database)
         self.challenges = ChallengeService(database)
         self.queries = GameRepository(database)
+        self.solo = SoloOpponent(self.matches, self.queries)
+        self.daily = DailyChallengeService(database, self.matches)
         self.sponsors = SponsorRepository(database)
 
     async def active_sponsors(self) -> list[Sponsor]:
@@ -191,6 +197,25 @@ class GameService:
 
     async def join_game(self, invite_token: str, player_id: int) -> Game:
         return await self.matches.join_game(invite_token, player_id)
+
+    async def create_solo_game(
+        self, creator_id: int, fists: int, total_hands: int, game_type: GameType
+    ) -> BotAdvance:
+        game = await self.matches.create_solo_game(creator_id, fists, total_hands, game_type)
+        return await self.advance_bot(game.id)
+
+    async def advance_bot(self, game_id: int) -> BotAdvance:
+        for _ in range(3):
+            try:
+                return await self.solo.advance(game_id)
+            except (StaleAction, NotYourTurn):
+                # Another callback advanced the same virtual turn; reload it.
+                continue
+        return await self.solo.advance(game_id)
+
+    async def start_daily_challenge(self, user_id: int) -> BotAdvance:
+        game = await self.daily.start(user_id)
+        return await self.advance_bot(game.id)
 
     async def cancel_waiting(self, game_id: int, user_id: int, expected_version: int) -> Game:
         return await self.matches.cancel_waiting(game_id, user_id, expected_version)

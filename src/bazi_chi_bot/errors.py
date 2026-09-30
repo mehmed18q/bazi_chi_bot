@@ -29,6 +29,14 @@ class NotYourTurn(GameError):
     pass
 
 
+class DailyChallengeClosed(GameError):
+    """A daily attempt cannot be played outside its one-hour window."""
+
+
+class DailyChallengeRequiresActivation(GameError):
+    """The account must be activated before joining a daily challenge."""
+
+
 class InvalidFist(GameError):
     pass
 

@@ -79,6 +79,8 @@ def _game_from_row(row: aiosqlite.Row) -> Game:
             for item in json.loads(row["mastermind_guesses_json"])
         ),
         mastermind_draft=tuple(json.loads(row["mastermind_draft_json"])),
+        is_solo=bool(row["is_solo"]),
+        daily_challenge_date=row["daily_challenge_date"],
     )
 
 

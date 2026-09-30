@@ -12,6 +12,8 @@ import aiosqlite
 from ..db import Database
 from ..errors import (
     CannotJoinOwnGame,
+    DailyChallengeClosed,
+    DailyChallengeRequiresActivation,
     GameNotFound,
     InvalidFist,
     InvalidGameSetup,
@@ -34,7 +36,7 @@ from ..models import (
 )
 from ..persistence.games import _locked_game
 from ..persistence.mappers import _game_from_row
-from ..persistence.scores import award_point, record_match_result
+from ..persistence.scores import award_point, record_draw, record_match_result
 from ..rules import (
     ALLOWED_FISTS,
     ALLOWED_HAND_COUNTS,
@@ -43,12 +45,14 @@ from ..rules import (
     MASTERMIND_MAX_ATTEMPTS,
     _require_player,
     _require_version,
-    evaluate_word_guess,
     evaluate_mastermind_guess,
+    evaluate_word_guess,
     normalize_mastermind_code,
     normalize_word,
     play_tic_tac_toe,
 )
+
+BOT_USER_ID = -1
 
 
 class MatchService:
@@ -137,6 +141,8 @@ class MatchService:
             if row is None:
                 raise GameNotFound
             game = _game_from_row(row)
+            if game.is_solo or player_id == BOT_USER_ID:
+                raise InviteUnavailable
             if player_id == game.creator_id:
                 raise CannotJoinOwnGame
             if game.status is not GameStatus.WAITING or game.player2_id is not None:
@@ -179,6 +185,106 @@ class MatchService:
                 await connection.execute("SELECT * FROM games WHERE id = ?", (game.id,))
             ).fetchone()
         return _game_from_row(updated)
+
+    async def create_solo_game(
+        self,
+        creator_id: int,
+        fists: int,
+        total_hands: int,
+        game_type: GameType,
+        *,
+        daily_date: str | None = None,
+        bot_starts: bool | None = None,
+    ) -> Game:
+        """Start an active match with the virtual player; no invite is issued."""
+        try:
+            game_type = GameType(game_type)
+        except ValueError as error:
+            raise InvalidGameSetup from error
+        if game_type is GameType.TRUTH_OR_DARE or creator_id == BOT_USER_ID:
+            raise InvalidGameSetup
+        valid_fists = (
+            fists == MASTERMIND_MAX_ATTEMPTS
+            if game_type is GameType.MASTERMIND
+            else fists in ALLOWED_FISTS
+        )
+        if not valid_fists or total_hands not in ALLOWED_HAND_COUNTS:
+            raise InvalidGameSetup
+        first = (
+            (BOT_USER_ID if bot_starts else creator_id)
+            if bot_starts is not None
+            else self.choose_first_hider((creator_id, BOT_USER_ID))
+        )
+        if first not in (creator_id, BOT_USER_ID):
+            raise RuntimeError("First-hider selector returned a non-player")
+        now = int(time.time())
+        async with self.database.transaction() as connection:
+            if daily_date is not None:
+                challenge = await (
+                    await connection.execute(
+                        "SELECT * FROM daily_challenges WHERE challenge_date = ?", (daily_date,)
+                    )
+                ).fetchone()
+                if challenge is None or not challenge["starts_at"] <= now < challenge["ends_at"]:
+                    raise DailyChallengeClosed
+                if (
+                    challenge["game_type"] != game_type.value
+                    or challenge["fists"] != fists
+                    or challenge["total_hands"] != total_hands
+                    or bool(challenge["bot_starts"]) != bot_starts
+                ):
+                    raise InvalidGameSetup
+                activated = await (
+                    await connection.execute(
+                        "SELECT is_activated FROM users WHERE telegram_id = ?", (creator_id,)
+                    )
+                ).fetchone()
+                if activated is None or not activated["is_activated"]:
+                    raise DailyChallengeRequiresActivation
+                existing = await (
+                    await connection.execute(
+                        "SELECT * FROM games WHERE daily_challenge_date = ? AND creator_id = ?",
+                        (daily_date, creator_id),
+                    )
+                ).fetchone()
+                if existing is not None:
+                    return _game_from_row(existing)
+            await connection.execute(
+                """
+                INSERT OR IGNORE INTO users (
+                    id, telegram_id, username, first_name, display_name,
+                    nickname, nickname_is_custom, created_at, updated_at
+                ) VALUES (
+                    (SELECT COALESCE(MAX(id), 0) + 1 FROM users),
+                    -1, NULL, 'ربات', '🤖 ربات', '🤖 ربات', 1, ?, ?
+                )
+                """,
+                (now, now),
+            )
+            await connection.execute(
+                "INSERT OR IGNORE INTO user_stats (telegram_id) VALUES (?)", (BOT_USER_ID,)
+            )
+            cursor = await connection.execute(
+                """
+                INSERT INTO games (
+                    invite_token, creator_id, player2_id, fists, total_hands,
+                    first_hider_id, hider_id, guesser_id, status, phase,
+                    next_player_id, round_starter_id, is_solo, game_type, daily_challenge_date,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, 1, ?, ?, ?, ?)
+                """,
+                (
+                    secrets.token_urlsafe(8), creator_id, BOT_USER_ID, fists, total_hands,
+                    first, first, BOT_USER_ID if first == creator_id else creator_id,
+                    "guessing" if game_type is GameType.TIC_TAC_TOE else "hiding",
+                    first if game_type is GameType.TIC_TAC_TOE else None,
+                    first if game_type is GameType.TIC_TAC_TOE else None,
+                    game_type.value,
+                    daily_date,
+                    now, now,
+                ),
+            )
+            return await _locked_game(connection, cursor.lastrowid)
 
     async def cancel_waiting(self, game_id: int, user_id: int, expected_version: int) -> Game:
         async with self.database.transaction() as connection:
@@ -260,7 +366,7 @@ class MatchService:
                     """
                     UPDATE games SET
                         player1_score = ?, player2_score = ?, hidden_fist = NULL,
-                        winner_id = ?, loser_id = ?, status = 'choice', phase = 'choice',
+                        winner_id = ?, loser_id = ?, status = ?, phase = ?,
                         version = version + 1, updated_at = ?
                     WHERE id = ? AND version = ? AND phase = 'guessing'
                     """,
@@ -269,6 +375,8 @@ class MatchService:
                         player2_score,
                         winner_id,
                         loser_id,
+                        "finished" if game.is_solo else "choice",
+                        "finished" if game.is_solo else "choice",
                         now,
                         game.id,
                         game.version,
@@ -297,7 +405,10 @@ class MatchService:
                 """,
                 (int(correct), int(not correct), game.guesser_id),
             )
-            await award_point(connection, game.id, point_winner_id, "round", game.hand_number)
+            if not game.is_solo:
+                await award_point(connection, game.id, point_winner_id, "round", game.hand_number)
+            elif match_finished and winner_id == game.creator_id:
+                await award_point(connection, game.id, winner_id, "round", game.hand_number)
             updated = await _locked_game(connection, game.id)
         return TurnResult(
             game=updated,
@@ -400,7 +511,7 @@ class MatchService:
                     """
                     UPDATE games SET word_attempts = ?, word_guesses_json = ?,
                         player1_score = ?, player2_score = ?,
-                        winner_id = ?, loser_id = ?, status = 'choice', phase = 'choice',
+                        winner_id = ?, loser_id = ?, status = ?, phase = ?,
                         version = version + 1, updated_at = ?
                     WHERE id = ? AND version = ? AND phase = 'guessing'
                     """,
@@ -411,6 +522,8 @@ class MatchService:
                         player2_score,
                         winner_id,
                         loser_id,
+                        "finished" if game.is_solo else "choice",
+                        "finished" if game.is_solo else "choice",
                         now,
                         game.id,
                         game.version,
@@ -434,7 +547,10 @@ class MatchService:
                 if cursor.rowcount != 1:
                     raise StaleAction
 
-            await award_point(connection, game.id, point_winner_id, "round", game.hand_number)
+            if not game.is_solo:
+                await award_point(connection, game.id, point_winner_id, "round", game.hand_number)
+            elif match_finished and winner_id == game.creator_id:
+                await award_point(connection, game.id, winner_id, "round", game.hand_number)
             updated = await _locked_game(connection, game.id)
         return WordGuessResult(
             game=updated,
@@ -545,7 +661,7 @@ class MatchService:
                 """
                 UPDATE games SET mastermind_attempts = ?, mastermind_guesses_json = ?,
                     mastermind_draft_json = '[]', player1_score = ?, player2_score = ?,
-                    winner_id = ?, loser_id = ?, status = 'choice', phase = 'choice',
+                    winner_id = ?, loser_id = ?, status = ?, phase = ?,
                     version = version + 1, updated_at = ?
                 WHERE id = ? AND version = ? AND phase = 'guessing'
                 """,
@@ -556,6 +672,8 @@ class MatchService:
                     player2_score,
                     winner_id,
                     loser_id,
+                    "finished" if game.is_solo else "choice",
+                    "finished" if game.is_solo else "choice",
                     now,
                     game.id,
                     game.version,
@@ -580,7 +698,10 @@ class MatchService:
             if cursor.rowcount != 1:
                 raise StaleAction
 
-        await award_point(connection, game.id, point_winner_id, "round", game.hand_number)
+        if not game.is_solo:
+            await award_point(connection, game.id, point_winner_id, "round", game.hand_number)
+        elif match_finished and winner_id == game.creator_id:
+            await award_point(connection, game.id, winner_id, "round", game.hand_number)
         updated = await _locked_game(connection, game.id)
         return MastermindGuessResult(
             game=updated,
@@ -706,8 +827,10 @@ class MatchService:
             board, won, round_finished = move.board, move.won, move.round_finished
             score1 = game.player1_score + int(won and user_id == game.creator_id)
             score2 = game.player2_score + int(won and user_id == game.player2_id)
-            finished = won and game.hand_number == game.total_hands
-            winner = (game.creator_id if score1 > score2 else game.player2_id) if finished else None
+            finished = (round_finished if game.is_solo else won) and game.hand_number == game.total_hands
+            winner = (
+                game.creator_id if score1 > score2 else game.player2_id if score2 > score1 else None
+            ) if finished else None
             loser = game.opponent_of(winner) if winner is not None else None
             starter = game.round_starter_id
             next_player = game.opponent_of(user_id)
@@ -727,9 +850,9 @@ class MatchService:
                     starter,
                     score1,
                     score2,
-                    game.hand_number + int(won and not finished),
-                    "choice" if finished else "active",
-                    "choice" if finished else "guessing",
+                    game.hand_number + int((round_finished if game.is_solo else won) and not finished),
+                    ("finished" if game.is_solo else "choice") if finished else "active",
+                    ("finished" if game.is_solo else "choice") if finished else "guessing",
                     winner,
                     loser,
                     int(time.time()),
@@ -737,9 +860,14 @@ class MatchService:
                     game.version,
                 ),
             )
-            if won:
+            if won and not game.is_solo:
                 await award_point(connection, game.id, user_id, "round", game.hand_number)
+            elif finished and winner == game.creator_id:
+                await award_point(connection, game.id, winner, "round", game.hand_number)
             if finished:
-                await record_match_result(connection, winner, loser)
+                if winner is None:
+                    await record_draw(connection, game.creator_id, game.player2_id)
+                else:
+                    await record_match_result(connection, winner, loser)
             updated = await _locked_game(connection, game.id)
         return MoveResult(updated, board, round_finished, user_id if won else None)

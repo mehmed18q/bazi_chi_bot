@@ -73,7 +73,8 @@ def render_game(
 
     header = f"🌸 <b>گل یا پوچ #{game.id}</b>\n✊ {game.fists} مشت | 🧮 {game.total_hands} دست"
     if game.game_type is GameType.TIC_TAC_TOE:
-        header = f"❌⭕ <b>دوز سه‌تایی #{game.id}</b>\n🧮 {game.total_hands} دستِ امتیازدار"
+        unit = "دست" if game.is_solo else "دستِ امتیازدار"
+        header = f"❌⭕ <b>دوز سه‌تایی #{game.id}</b>\n🧮 {game.total_hands} {unit}"
     elif game.game_type is GameType.TRUTH_OR_DARE:
         header = f"🎭 <b>جرئت یا حقیقت #{game.id}</b>\n🧮 {game.total_hands} دور"
     elif game.game_type is GameType.WORD_GUESS:
@@ -98,7 +99,16 @@ def render_game(
         else "دست"
     )
     hand = f"\n\n🎲 {round_name} <b>{game.hand_number}</b> از <b>{game.total_hands}</b>"
-    if game.game_type is GameType.TIC_TAC_TOE and game.status is GameStatus.ACTIVE:
+    if game.is_solo and game.status is GameStatus.FINISHED:
+        if game.winner_id == viewer_id:
+            state = "🏆 <b>ربات را بردی!</b> یک امتیاز به مجموع امتیازهایت اضافه شد."
+        elif game.winner_id is None:
+            state = "🤝 <b>بازی با ربات مساوی شد.</b> امتیازی ثبت نشد."
+        else:
+            state = "🏁 <b>این بار ربات برنده شد.</b> امتیازی ثبت نشد."
+        if game.game_type is GameType.TIC_TAC_TOE:
+            state += f"\n\n{board_text(game.board)}"
+    elif game.game_type is GameType.TIC_TAC_TOE and game.status is GameStatus.ACTIVE:
         symbol = "❌" if viewer_id == game.creator_id else "⭕"
         state = (
             f"🎯 <b>نوبت توست</b>\nبا {symbol} یک خانهٔ خالی را انتخاب کن."
@@ -297,7 +307,11 @@ def render_game(
                 "حالا منتظر سؤال یا چالش برنده باش و جوانمردانه انجامش بده! 🤝"
             )
     elif game.phase is GamePhase.CANCELLED:
-        state = "❌ این بازی لغو شده است."
+        state = (
+            "🏁 زمان چالش روزانه به پایان رسید؛ این بازی دیگر امتیاز ندارد."
+            if game.daily_challenge_date is not None
+            else "❌ این بازی لغو شده است."
+        )
     else:
         state = "⏳ وضعیت بازی در حال به‌روزرسانی است."
 

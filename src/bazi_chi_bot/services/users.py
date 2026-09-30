@@ -159,7 +159,7 @@ class UserService:
     async def all_users(self) -> list[User]:
         async with self.database.connect() as connection:
             rows = await (
-                await connection.execute("SELECT * FROM users ORDER BY updated_at DESC")
+                await connection.execute("SELECT * FROM users WHERE telegram_id != -1 ORDER BY updated_at DESC")
             ).fetchall()
         return [_user_from_row(row) for row in rows]
 
@@ -195,6 +195,7 @@ class UserService:
                         FROM users AS u
                         LEFT JOIN user_stats AS s ON s.telegram_id = u.telegram_id
                         LEFT JOIN monthly_points AS p ON p.user_id = u.telegram_id
+                        WHERE u.telegram_id != -1
                     )
                     SELECT rank, telegram_id, display_name, points_won, wins, games_played
                     FROM ranked
@@ -235,6 +236,7 @@ class UserService:
                         FROM users AS u
                         LEFT JOIN user_stats AS s ON s.telegram_id = u.telegram_id
                         LEFT JOIN monthly_points AS p ON p.user_id = u.telegram_id
+                        WHERE u.telegram_id != -1
                     )
                     SELECT rank, telegram_id, display_name, points_won, wins, games_played
                     FROM ranked
@@ -270,6 +272,7 @@ class UserService:
                             ) AS rank
                         FROM users AS u
                         LEFT JOIN user_stats AS s ON s.telegram_id = u.telegram_id
+                        WHERE u.telegram_id != -1
                     )
                     SELECT rank, telegram_id, display_name, points_won, wins, games_played
                     FROM ranked
@@ -302,6 +305,7 @@ class UserService:
                             ) AS rank
                         FROM users AS u
                         LEFT JOIN user_stats AS s ON s.telegram_id = u.telegram_id
+                        WHERE u.telegram_id != -1
                     )
                     SELECT rank, telegram_id, display_name, points_won, wins, games_played
                     FROM ranked
