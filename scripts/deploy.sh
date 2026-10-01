@@ -5,10 +5,12 @@ export LC_MESSAGES=C
 
 service_name="bazi_chi_bot.service"
 unit_path="/etc/systemd/system/$service_name"
-backup_parent="/var/backups/bazi_chi_bot"
+backup_parent="/var/lib/data/backup"
 script_dir="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 repo_dir="$(dirname -- "$script_dir")"
 backup_dir=""
+database_backup_path=""
+database_backup_ready=0
 previous_commit=""
 service_touched=0
 was_active=0
@@ -50,7 +52,14 @@ on_exit() {
         fi
     fi
     if [[ -n "$backup_dir" ]]; then
-        log "Backup directory: $backup_dir" >&2
+        log "Deployment metadata backup: $backup_dir" >&2
+    fi
+    if [[ -n "$database_backup_path" ]]; then
+        if (( database_backup_ready == 1 )); then
+            log "Database backup: $database_backup_path" >&2
+        else
+            log "Database backup target (may be incomplete): $database_backup_path" >&2
+        fi
     fi
 }
 trap 'on_exit $?' EXIT
@@ -121,13 +130,17 @@ if as_root systemctl is-active --quiet "$service_name"; then
     die "The service is still active after systemctl stop."
 fi
 umask 077
-as_root install -d -m 0700 "$backup_parent"
-backup_dir="$(as_root mktemp -d "$backup_parent/$(date -u +%Y%m%dT%H%M%SZ).XXXXXX")"
+if ! as_root test -d "$backup_parent"; then
+    as_root install -d -m 0700 "$backup_parent"
+fi
+backup_stamp="$(date -u +%Y-%m-%dT%H-%M-%S.%NZ)"
+backup_dir="$(as_root mktemp -d "$backup_parent/deploy-${backup_stamp}.XXXXXX")"
+database_backup_path="$backup_parent/bazi_chi_bot_${backup_stamp}.sqlite3"
 printf '%s\n' "$previous_commit" | as_root tee "$backup_dir/previous-commit.txt" >/dev/null
 as_root chmod 0600 "$backup_dir/previous-commit.txt"
 as_root install -m 0600 .env "$backup_dir/.env"
 as_root install -m 0600 "$unit_path" "$backup_dir/$service_name"
-as_root env BOT_BACKUP_DIR="$backup_dir" .venv/bin/python - <<'PY'
+as_root env BOT_BACKUP_PATH="$database_backup_path" .venv/bin/python - <<'PY'
 import os
 import sqlite3
 from contextlib import closing
@@ -138,7 +151,13 @@ from bazi_chi_bot.config import Settings
 source_path = Settings().database_path.resolve()
 if not source_path.is_file():
     raise SystemExit(f"Database not found: {source_path}")
-backup_path = Path(os.environ["BOT_BACKUP_DIR"]) / "database.sqlite3"
+backup_path = Path(os.environ["BOT_BACKUP_PATH"])
+try:
+    descriptor = os.open(backup_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+except FileExistsError:
+    raise SystemExit(f"Database backup already exists: {backup_path}") from None
+else:
+    os.close(descriptor)
 with closing(sqlite3.connect(source_path.as_uri() + "?mode=ro", uri=True)) as source:
     with closing(sqlite3.connect(backup_path)) as backup:
         source.backup(backup)
@@ -148,6 +167,9 @@ with closing(sqlite3.connect(source_path.as_uri() + "?mode=ro", uri=True)) as so
 backup_path.chmod(0o600)
 print(f"Database backup OK: {backup_path}")
 PY
+database_backup_ready=1
+printf '%s\n' "$database_backup_path" | as_root tee "$backup_dir/database-backup-path.txt" >/dev/null
+as_root chmod 0600 "$backup_dir/database-backup-path.txt"
 
 log "Applying the update and installing dependencies..."
 git merge --ff-only "$target_commit"
@@ -187,5 +209,6 @@ as_root systemctl is-active --quiet "$service_name" || die "The service did not 
 as_root journalctl -u "$service_name" -n 30 --no-pager ||
     log "Warning: Could not read the logs; check the service status separately."
 log "Deployment completed: $previous_commit -> $target_commit"
-log "Backup directory: $backup_dir"
+log "Deployment metadata backup: $backup_dir"
+log "Database backup: $database_backup_path"
 log "Also verify /start and a game interaction in Telegram."

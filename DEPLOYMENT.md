@@ -24,13 +24,17 @@ bash scripts/deploy.sh
 اسکریپت فقط روی شاخهٔ تمیز `master` اجرا می‌شود؛ نسخه را از `origin/master` با
 fast-forward می‌گیرد، سرویس را متوقف می‌کند، از `.env`، واحد systemd و SQLite
 پشتیبان می‌گیرد، وابستگی‌ها و تست‌ها را اجرا می‌کند و سرویس را دوباره بالا می‌آورد.
-مسیر پشتیبان و commitها در خروجی چاپ می‌شوند. اگر آپدیت، فایل واحد systemd را تغییر
+فایل دیتابیس مستقیم در `/var/lib/data/backup` با نامی مانند
+`bazi_chi_bot(2026-10-01T09-30-00.123456789Z).sqlite3` ذخیره می‌شود؛ زمان نام فایل
+UTC است. `.env`، فایل سرویس و شناسهٔ commit در یک زیرپوشهٔ جدا در همان مسیر
+می‌مانند. هر دو مسیر و commitها در خروجی چاپ می‌شوند. اگر آپدیت، فایل واحد systemd را تغییر
 دهد ولی نسخهٔ نصب‌شده یا drop-inهای سرور سفارشی باشند، اسکریپت **قبل از توقف
 سرویس** متوقف می‌شود. اگر خطا پس از تغییر کد رخ دهد، برای جلوگیری از اجرای کد و دیتابیس
 ناسازگار، سرویس متوقف می‌ماند؛ بخش «بازگشت در صورت خطا» را دنبال کنید. بررسی عملی
-ربات در تلگرام همچنان لازم است. برای فرمان‌های بازگشت، مسیر پشتیبان چاپ‌شده را ابتدا
-در متغیر `bot_backup_dir` قرار دهید؛ متغیرهای داخل اسکریپت به shell شما منتقل
-نمی‌شوند.
+ربات در تلگرام همچنان لازم است. برای فرمان‌های بازگشت، مسیر زیرپوشهٔ اطلاعات
+استقرار چاپ‌شده را ابتدا در متغیر `bot_backup_dir` قرار دهید؛ مسیر فایل دیتابیس
+در `database-backup-path.txt` همان زیرپوشه ثبت می‌شود. متغیرهای داخل اسکریپت به
+shell شما منتقل نمی‌شوند.
 
 بخش‌های بعد، روش دستی و راهنمای بازگشت را توضیح می‌دهند.
 
@@ -62,8 +66,12 @@ stash خودکار کنار نگذارید. تغییرات ورودی، مخصو
 ```bash
 sudo systemctl stop bazi_chi_bot.service
 umask 077
-bot_backup_dir="/var/backups/bazi_chi_bot/$(date -u +%Y%m%dT%H%M%SZ)"
-sudo install -d -m 0700 "$bot_backup_dir"
+if [ ! -d /var/lib/data/backup ]; then
+  sudo install -d -m 0700 /var/lib/data/backup
+fi
+bot_backup_stamp="$(date -u +%Y-%m-%dT%H-%M-%S.%NZ)"
+bot_backup_dir="$(sudo mktemp -d "/var/lib/data/backup/deploy-${bot_backup_stamp}.XXXXXX")"
+bot_db_backup="/var/lib/data/backup/bazi_chi_bot(${bot_backup_stamp}).sqlite3"
 git rev-parse HEAD | sudo tee "$bot_backup_dir/previous-commit.txt" >/dev/null
 sudo install -m 0600 .env "$bot_backup_dir/.env"
 if [ -f /etc/systemd/system/bazi_chi_bot.service ]; then
@@ -77,7 +85,7 @@ fi
 باید به‌روزرسانی متوقف شود.
 
 ```bash
-sudo env BOT_BACKUP_DIR="$bot_backup_dir" .venv/bin/python - <<'PY'
+sudo env BOT_BACKUP_PATH="$bot_db_backup" .venv/bin/python - <<'PY'
 import os
 import sqlite3
 from contextlib import closing
@@ -88,7 +96,13 @@ from bazi_chi_bot.config import Settings
 source_path = Settings().database_path.resolve()
 if not source_path.is_file():
     raise SystemExit(f"Database not found: {source_path}")
-backup_path = Path(os.environ["BOT_BACKUP_DIR"]) / "database.sqlite3"
+backup_path = Path(os.environ["BOT_BACKUP_PATH"])
+try:
+    descriptor = os.open(backup_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+except FileExistsError:
+    raise SystemExit(f"Database backup already exists: {backup_path}") from None
+else:
+    os.close(descriptor)
 with closing(sqlite3.connect(source_path.as_uri() + "?mode=ro", uri=True)) as source:
     with closing(sqlite3.connect(backup_path)) as backup:
         source.backup(backup)
@@ -98,6 +112,8 @@ with closing(sqlite3.connect(source_path.as_uri() + "?mode=ro", uri=True)) as so
 backup_path.chmod(0o600)
 print(f"Database backup OK: {backup_path}")
 PY
+printf '%s\n' "$bot_db_backup" | sudo tee "$bot_backup_dir/database-backup-path.txt" >/dev/null
+sudo chmod 0600 "$bot_backup_dir/database-backup-path.txt"
 ```
 
 اگر ابزار دعوت از اکسل را هم روی همین سرور استفاده می‌کنید، از داده‌های مستقل آن
@@ -195,7 +211,8 @@ sudo install -m 0600 "$bot_backup_dir/.env" .env
 جابه‌جا یا حذف نکنید:
 
 ```bash
-sudo env BOT_BACKUP_DIR="$bot_backup_dir" .venv/bin/python - <<'PY'
+bot_db_backup="$(sudo cat "$bot_backup_dir/database-backup-path.txt")"
+sudo env BOT_BACKUP_PATH="$bot_db_backup" .venv/bin/python - <<'PY'
 import os
 import sqlite3
 from contextlib import closing
@@ -203,7 +220,7 @@ from pathlib import Path
 
 from bazi_chi_bot.config import Settings
 
-backup_path = Path(os.environ["BOT_BACKUP_DIR"]) / "database.sqlite3"
+backup_path = Path(os.environ["BOT_BACKUP_PATH"])
 database_path = Settings().database_path.resolve()
 with closing(sqlite3.connect(backup_path.as_uri() + "?mode=ro", uri=True)) as backup:
     with closing(sqlite3.connect(database_path)) as database:
