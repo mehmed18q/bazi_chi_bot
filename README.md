@@ -131,8 +131,8 @@ V2Ray/Clash/sing-box را مستقیم داخل این آرایه نگذارید
 
 ## دعوت کاربران رضایت‌داده
 
-ابزار مستقل `scripts/send_opt_in_invitations.py` شماره‌های فایل
-`phones/all_phones.xlsx` را یک بار به دیتابیس مستقل `data/phones.sqlite3` وارد می‌کند.
+ابزار مستقل `invitation/send_opt_in_invitations.py` شماره‌های فایل
+`phones/all_phones.xlsx` را یک بار به دیتابیس مستقل `invitation/phones.sqlite3` وارد می‌کند.
 این دیتابیس جدا از `data/bazi_chi_bot.sqlite3` ربات است. جدول `phones` ستون‌های
 `id`, `name`, `phone`, `source`, `status`, `is_send` دارد؛ شماره و نتیجهٔ ارسال در یک ردیف
 هستند. شماره‌ها به قالب `09xxxxxxxxx` یکسان می‌شوند؛ شماره‌های `9xxxxxxxxx`،
