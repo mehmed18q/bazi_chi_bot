@@ -5,6 +5,7 @@ import pytest
 
 from bazi_chi_bot.daily_schedule import challenge_window, local_date, next_reminder_at
 from bazi_chi_bot.errors import DailyChallengeClosed, DailyChallengeRequiresActivation
+from bazi_chi_bot.game import GameService
 from bazi_chi_bot.models import GameStatus, GameType
 from bazi_chi_bot.reset_database import reset_history
 from bazi_chi_bot.services.countdowns import CountdownService
@@ -105,7 +106,8 @@ async def test_daily_reminder_repeats_without_replacing_admin_countdown(database
     countdowns = CountdownService(database)
     with pytest.raises(DailyChallengeRequiresActivation):
         await countdowns.subscribe_daily_reminder(user.telegram_id, now=start)
-    await service.set_user_activation(user.telegram_id, 999, True)
+    receipt = await service.submit_payment_receipt(user.telegram_id, receipt_text="paid")
+    await service.review_payment_receipt(receipt.id, 999, True)
     reminder = await countdowns.subscribe_daily_reminder(user.telegram_id, now=start)
     assert reminder.kind == "daily_reminder"
     assert reminder.target_at == next_reminder_at(start)
@@ -123,6 +125,37 @@ async def test_daily_reminder_repeats_without_replacing_admin_countdown(database
     assert await countdowns.cancel_daily_reminder(user.telegram_id)
     assert await countdowns.daily_reminder(user.telegram_id) is None
     assert (await countdowns.next_due()).id == normal.id
+
+
+async def test_admin_exemption_applies_to_reminder_delivery_and_daily_game(
+    database, players, monkeypatch
+):
+    start, _ = _challenge_times()
+    admin_id = players[0].telegram_id
+    admin_ids = frozenset({admin_id})
+    countdowns = CountdownService(database, activation_exempt_ids=admin_ids)
+    service = GameService(database, activation_exempt_ids=admin_ids)
+    reminder = await countdowns.subscribe_daily_reminder(admin_id, now=start - 360)
+
+    class BotStub:
+        def __init__(self):
+            self.messages = []
+
+        async def send_message(self, user_id, text, **kwargs):
+            self.messages.append((user_id, text))
+
+    bot = BotStub()
+    await CountdownScheduler(countdowns, bot)._deliver(reminder, reminder.target_at)
+    assert bot.messages[0][0] == admin_id
+    assert await countdowns.daily_reminder(admin_id) is not None
+
+    monkeypatch.setattr("time.time", lambda: start + 5)
+    challenge = await service.daily.ensure_today()
+    assert (await service.daily.start(admin_id)).creator_id == admin_id
+    await service.daily.queue_notifications(challenge, "start")
+    assert await service.daily.next_notification() == (challenge.challenge_date, admin_id, "start")
+    with pytest.raises(DailyChallengeRequiresActivation):
+        await countdowns.subscribe_daily_reminder(players[1].telegram_id, now=start)
 
 
 async def test_reminder_and_start_end_worker_delivery(database, service, players, monkeypatch):

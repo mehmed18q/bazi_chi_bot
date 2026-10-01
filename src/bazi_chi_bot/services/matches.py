@@ -60,9 +60,12 @@ class MatchService:
         self,
         database: Database,
         choose_first_hider: Callable[[Sequence[int]], int] = secrets.choice,
+        *,
+        activation_exempt_ids: frozenset[int] = frozenset(),
     ) -> None:
         self.database = database
         self.choose_first_hider = choose_first_hider
+        self.activation_exempt_ids = activation_exempt_ids
 
     async def create_game(
         self,
@@ -239,7 +242,10 @@ class MatchService:
                         "SELECT is_activated FROM users WHERE telegram_id = ?", (creator_id,)
                     )
                 ).fetchone()
-                if activated is None or not activated["is_activated"]:
+                if activated is None or (
+                    not activated["is_activated"]
+                    and creator_id not in self.activation_exempt_ids
+                ):
                     raise DailyChallengeRequiresActivation
                 existing = await (
                     await connection.execute(

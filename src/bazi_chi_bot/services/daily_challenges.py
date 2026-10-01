@@ -41,6 +41,7 @@ class DailyChallengeService:
     def __init__(self, database: Database, matches: MatchService) -> None:
         self.database = database
         self.matches = matches
+        self.activation_exempt_ids = matches.activation_exempt_ids
 
     @staticmethod
     def window_status(now: int | None = None) -> str:
@@ -172,13 +173,19 @@ class DailyChallengeService:
                 ).fetchone()
                 if row is None or row["end_queued_at"] is not None:
                     return
+            exempt_ids = tuple(sorted(self.activation_exempt_ids))
+            exempt_sql = (
+                f" OR telegram_id IN ({', '.join('?' for _ in exempt_ids)})"
+                if exempt_ids
+                else ""
+            )
             await connection.execute(
-                """
+                f"""
                 INSERT OR IGNORE INTO daily_notifications (challenge_date, user_id, event)
                 SELECT ?, telegram_id, ? FROM users
-                WHERE is_activated = 1 AND telegram_id != -1
+                WHERE telegram_id != -1 AND (is_activated = 1{exempt_sql})
                 """,
-                (challenge.challenge_date, event),
+                (challenge.challenge_date, event, *exempt_ids),
             )
             if event == "end":
                 await connection.execute(

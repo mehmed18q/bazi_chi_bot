@@ -259,11 +259,11 @@ async def run_bot(settings: Settings) -> None:
     database = Database(settings.database_path)
     await database.initialize()
     logger.info("Database initialized at %s", settings.database_path)
-    service = GameService(database)
-    countdown_service = CountdownService(database)
     countdown_admin_ids = parse_admin_ids(settings.admin_telegram_ids)
     payment_reviewer_ids = parse_admin_ids(settings.payment_reviewer_telegram_ids)
     admin_ids = countdown_admin_ids | payment_reviewer_ids
+    service = GameService(database, activation_exempt_ids=admin_ids)
+    countdown_service = CountdownService(database, activation_exempt_ids=admin_ids)
     startup_state = StartupState()
 
     while True:

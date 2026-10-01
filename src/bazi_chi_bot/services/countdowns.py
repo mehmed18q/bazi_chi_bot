@@ -44,8 +44,16 @@ def _countdown_from_row(row: aiosqlite.Row) -> Countdown:
 
 
 class CountdownService:
-    def __init__(self, database: Database) -> None:
+    def __init__(
+        self, database: Database, *, activation_exempt_ids: frozenset[int] = frozenset()
+    ) -> None:
         self.database = database
+        self.activation_exempt_ids = activation_exempt_ids
+
+    def can_receive_daily_reminder(self, user: User | None) -> bool:
+        return user is not None and (
+            user.is_activated or user.telegram_id in self.activation_exempt_ids
+        )
 
     async def resolve_user(self, value: str) -> User | None:
         identifier = value.strip()
@@ -243,7 +251,9 @@ class CountdownService:
                     "SELECT is_activated FROM users WHERE telegram_id = ?", (user_id,)
                 )
             ).fetchone()
-            if user is None or not user["is_activated"]:
+            if user is None or (
+                not user["is_activated"] and user_id not in self.activation_exempt_ids
+            ):
                 raise DailyChallengeRequiresActivation
             await connection.execute(
                 """

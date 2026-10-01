@@ -69,7 +69,7 @@ class CountdownScheduler:
         daily_reminder = countdown.kind == "daily_reminder"
         if daily_reminder:
             user = await self.service.resolve_user(str(countdown.target_user_id))
-            if user is None or not user.is_activated:
+            if not self.service.can_receive_daily_reminder(user):
                 await self.service.cancel_daily_reminder(countdown.target_user_id)
                 return
         if daily_reminder and now >= countdown.target_at + 5 * 60:

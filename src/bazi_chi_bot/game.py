@@ -56,10 +56,14 @@ class GameService:
         self,
         database: Database,
         choose_first_hider: Callable[[Sequence[int]], int] = secrets.choice,
+        *,
+        activation_exempt_ids: frozenset[int] = frozenset(),
     ) -> None:
         self.database = database
         self.users = UserService(database)
-        self.matches = MatchService(database, choose_first_hider)
+        self.matches = MatchService(
+            database, choose_first_hider, activation_exempt_ids=activation_exempt_ids
+        )
         self.payments = PaymentService(database)
         self.challenges = ChallengeService(database)
         self.queries = GameRepository(database)
