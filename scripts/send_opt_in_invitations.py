@@ -1,11 +1,5 @@
 #!/usr/bin/env python3
-"""Send invitations to the project's fully opted-in contact workbook.
-
-The input workbook is intentionally fixed. It is read in streaming mode and never
-modified. A single sheet and a bounded number of records can be selected for each
-run. Per-contact delivery state is kept in SQLite so a multi-million-row XLSX does
-not have to be loaded and rewritten after every Telegram request.
-"""
+"""Import opted-in contacts once, then send invitations from a separate SQLite DB."""
 
 import argparse
 import asyncio
@@ -13,73 +7,20 @@ import os
 import re
 import sqlite3
 import sys
-from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Iterator
 from urllib.parse import urlparse
-
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 INPUT_WORKBOOK = PROJECT_ROOT / "phones" / "all_phones.xlsx"
-DEFAULT_STATE_DB = PROJECT_ROOT / "data" / "outreach" / "invitations.sqlite3"
-
-# The owner of this list has explicitly confirmed that every contact opted in.
+DEFAULT_PHONES_DB = PROJECT_ROOT / "phones" / "phones.sqlite3"
 CONSENT = True
 
 NAME_HEADERS = ("name", "title", "نام و نام خانوادگی", "نام کامل", "نام")
 PHONE_HEADERS = ("phone", "mobile", "شماره تماس", "شماره تلفن", "موبایل")
 SOURCE_HEADERS = ("source", "منبع")
-
-TERMINAL_STATUS_PREFIXES = (
-    "SENT",
-    "NOT_ON_TELEGRAM",
-    "NOT_SENT_PRIVACY",
-    "INVALID_PHONE",
-    "STOPPED_SPAM_RESTRICTION",
-    "DO_NOT_CONTACT",
-    "UNSUBSCRIBED",
-    "لغو",
-)
 PERSIAN_DIGITS = str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "01234567890123456789")
-
-
-@dataclass(frozen=True, slots=True)
-class ExcelContact:
-    sequence: int
-    sheet_name: str
-    row_number: int
-    name: str
-    raw_phone: object
-    source: str
-
-
-@dataclass(frozen=True, slots=True)
-class PreparedContact:
-    sequence: int
-    sheet_name: str
-    row_number: int
-    name: str
-    phone: str
-    source: str
-
-    @property
-    def record_key(self) -> str:
-        return self.phone
-
-
-@dataclass(frozen=True, slots=True)
-class DeliveryReport:
-    """Cumulative delivery report for the selected workbook scope."""
-
-    total_users: int
-    sent: int
-    failed_by_reason: dict[str, int]
-    remaining: int
-
-    @property
-    def failed(self) -> int:
-        return sum(self.failed_by_reason.values())
+RETRYABLE_STATUSES = ("PENDING", "ERROR", "ERROR_RPC", "PAUSED_FLOOD_WAIT")
 
 
 def clean_text(value: object) -> str:
@@ -91,7 +32,6 @@ def normalize_header(value: object) -> str:
 
 
 def create_message(full_name: object, bot_link: str) -> str:
-    """Build plain text; an empty Excel name produces a natural generic greeting."""
     name = clean_text(full_name)
     greeting = f"سلام {name} عزیز 👋" if name else "سلام 👋"
     return f"""{greeting}
@@ -118,38 +58,35 @@ def normalize_country_code(value: str) -> str:
 
 
 def normalize_phone(value: object, default_country_code: str) -> str:
+    if normalize_country_code(default_country_code) != "+98":
+        raise ValueError("برای این فهرست فقط کد کشور +98 پشتیبانی می‌شود")
+    mobile = normalize_mobile(value)
+    if mobile is None:
+        raise ValueError("شمارهٔ موبایل باید ۱۱ رقم و با 09 شروع شود")
+    return f"+98{mobile[1:]}"
+
+
+def normalize_mobile(value: object) -> str | None:
+    """Return an Iranian mobile in 09xxxxxxxxx form, or None if invalid."""
     if value is None or isinstance(value, bool):
-        raise ValueError("شماره خالی است")
+        return None
     if isinstance(value, float):
         if not value.is_integer():
-            raise ValueError("شماره در اکسل به‌صورت عدد اعشاری ذخیره شده است")
+            return None
         raw = str(int(value))
     else:
         raw = str(value)
-    raw = raw.translate(PERSIAN_DIGITS).strip()
-    raw = re.sub(r"[\s\-()]+", "", raw)
-    if raw.startswith("00"):
-        raw = f"+{raw[2:]}"
-
-    country_code = normalize_country_code(default_country_code)
-    country_digits = country_code[1:]
-    if raw.startswith("+"):
-        normalized = f"+{re.sub(r'\D', '', raw[1:])}"
-    else:
-        digits = re.sub(r"\D", "", raw)
-        if digits.startswith(country_digits):
-            normalized = f"+{digits}"
-        elif digits.startswith("0"):
-            normalized = f"{country_code}{digits[1:]}"
-        elif country_code == "+98" and len(digits) == 10 and digits.startswith("9"):
-            normalized = f"+98{digits}"
-        else:
-            raise ValueError("شماره باید با کد کشور، مثل +98912...، ثبت شده باشد")
-
-    digits = normalized[1:]
-    if not 8 <= len(digits) <= 15 or digits.startswith("0"):
-        raise ValueError("طول یا قالب شماره معتبر نیست")
-    return normalized
+    raw = re.sub(r"[\s\-().]+", "", raw.translate(PERSIAN_DIGITS).strip())
+    if raw.startswith("+98"):
+        raw = raw[3:]
+    elif raw.startswith("0098"):
+        raw = raw[4:]
+    elif raw.startswith("98"):
+        raw = raw[2:]
+    raw = raw.removeprefix("0")
+    if len(raw) != 10 or not raw.startswith("9") or not raw.isascii() or not raw.isdecimal():
+        return None
+    return f"0{raw}"
 
 
 def mask_phone(phone: str) -> str:
@@ -160,9 +97,17 @@ def timestamp() -> str:
     return datetime.now().astimezone().isoformat(timespec="seconds")
 
 
+def status_reason(status: object) -> str:
+    return clean_text(status).split("|", 1)[0].strip() or "UNKNOWN"
+
+
 def status_is_terminal(value: object) -> bool:
-    status = clean_text(value).upper()
-    return any(status.startswith(prefix.upper()) for prefix in TERMINAL_STATUS_PREFIXES)
+    return status_reason(value) not in RETRYABLE_STATUSES
+
+
+def safe_error(error: BaseException, limit: int = 140) -> str:
+    detail = clean_text(error).replace("|", "/")
+    return f"{type(error).__name__}: {detail}"[:limit]
 
 
 def validate_bot_link(value: str) -> str:
@@ -176,14 +121,6 @@ def validate_bot_link(value: str) -> str:
     return link
 
 
-def header_map(header_row: tuple[object, ...]) -> dict[str, int]:
-    return {
-        normalize_header(value): index
-        for index, value in enumerate(header_row)
-        if normalize_header(value)
-    }
-
-
 def find_column(headers: dict[str, int], aliases: tuple[str, ...]) -> int | None:
     for alias in aliases:
         column = headers.get(normalize_header(alias))
@@ -192,660 +129,382 @@ def find_column(headers: dict[str, int], aliases: tuple[str, ...]) -> int | None
     return None
 
 
-def safe_error(error: BaseException, limit: int = 140) -> str:
-    text = clean_text(error).replace("|", "/")
-    return f"{type(error).__name__}: {text}"[:limit]
-
-
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description=(
-            "ارسال دعوت بازی‌چی به فهرست ثابت all_phones.xlsx؛ "
-            "همهٔ مخاطبان این فایل رضایت داده‌اند"
-        )
-    )
-    parser.add_argument(
-        "--api-id", type=int, default=os.getenv("TELEGRAM_API_ID"), help="API ID اکانت تلگرام"
-    )
-    parser.add_argument(
-        "--api-hash", default=os.getenv("TELEGRAM_API_HASH"), help="API hash اکانت تلگرام"
-    )
-    parser.add_argument(
-        "--phone",
-        default=os.getenv("OUTREACH_PHONE"),
-        help="شمارهٔ اکانت با کد کشور؛ اگر خالی باشد Telethon تعاملی می‌پرسد",
-    )
-    parser.add_argument(
-        "--session",
-        type=Path,
-        default=Path(os.getenv("OUTREACH_SESSION", "data/outreach/account")),
-        help="مسیر session؛ اطلاعات ورود بعد از اولین اجرا در آن می‌ماند",
-    )
-    parser.add_argument(
-        "--state-db",
-        type=Path,
-        default=Path(os.getenv("OUTREACH_STATE_DB", str(DEFAULT_STATE_DB))),
-        help="SQLite وضعیت ارسال، لغو و خطاها",
-    )
-    parser.add_argument(
-        "--sheet",
-        "--sheet-name",
-        dest="sheet_name",
-        default=os.getenv("OUTREACH_SHEET"),
-        help="فقط همین شیت را پردازش کن؛ نام شیت اکسل",
-    )
-    parser.add_argument(
-        "--count",
-        type=int,
-        default=(
-            int(os.environ["OUTREACH_COUNT"])
-            if os.getenv("OUTREACH_COUNT")
-            else None
-        ),
-        help="حداکثر تعداد رکوردی که از شیت انتخابی پردازش می‌شود",
-    )
-    parser.add_argument(
-        "--bot-link", default=os.getenv("OUTREACH_BOT_LINK"), help="مثل https://t.me/MyBot"
-    )
-    parser.add_argument("--default-country-code", default="+98")
-    parser.add_argument(
-        "--delay",
-        type=float,
-        default=120,
-        help="فاصلهٔ ثابت بین بررسی مخاطبان، بر حسب ثانیه؛ حداقل مجاز ۳۰ است",
-    )
-    parser.add_argument(
-        "--max-per-day",
-        type=int,
-        default=20,
-        help="سقف محافظه‌کارانهٔ ارسال موفق در هر روز",
-    )
-    parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="فقط پنج مخاطب آماده و متن پیام را بررسی کن؛ به تلگرام وصل نشو",
-    )
-    return parser.parse_args()
-
-
-def validate_args(args: argparse.Namespace) -> None:
-    if not CONSENT:
-        raise ValueError("CONSENT باید برای این فهرست صریحاً True باشد")
-    if not INPUT_WORKBOOK.is_file() or INPUT_WORKBOOK.suffix.casefold() != ".xlsx":
-        raise ValueError(f"فایل ورودی ثابت پیدا نشد: {INPUT_WORKBOOK}")
-    if not args.bot_link:
-        raise ValueError("--bot-link یا OUTREACH_BOT_LINK الزامی است")
-    args.bot_link = validate_bot_link(args.bot_link)
-    if getattr(args, "count", None) is not None and args.count < 1:
-        raise ValueError("count باید عددی بزرگ‌تر از صفر باشد")
-    if getattr(args, "sheet_name", None) is not None:
-        args.sheet_name = clean_text(args.sheet_name)
-        if not args.sheet_name:
-            raise ValueError("نام شیت نمی‌تواند خالی باشد")
-    normalize_country_code(args.default_country_code)
-    if args.delay < 30:
-        raise ValueError("فاصلهٔ ارسال باید حداقل ۳۰ ثانیه باشد")
-    if not 1 <= args.max_per_day <= 100:
-        raise ValueError("max-per-day باید بین ۱ و ۱۰۰ باشد")
-    if not args.dry_run and (not args.api_id or not args.api_hash):
-        raise ValueError("TELEGRAM_API_ID و TELEGRAM_API_HASH یا آرگومان معادل آن‌ها الزامی است")
-
-
-def load_dependencies() -> tuple[Any, Any, Any, Any]:
-    try:
-        from openpyxl import load_workbook
-        from telethon import TelegramClient, errors
-        from telethon.tl.functions.contacts import ImportContactsRequest
-        from telethon.tl.types import InputPhoneContact
-    except ModuleNotFoundError as error:
-        raise RuntimeError(
-            "وابستگی‌ها نصب نیستند؛ اجرا کن: .venv/bin/pip install -e '.[outreach]'"
-        ) from error
-    return load_workbook, TelegramClient, errors, (ImportContactsRequest, InputPhoneContact)
-
-
-def open_state_database(path: Path | str) -> sqlite3.Connection:
-    if path != ":memory:":
-        path = Path(path)
-        path.parent.mkdir(parents=True, exist_ok=True)
+def open_phones_database(path: Path) -> sqlite3.Connection:
+    path.parent.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(path)
     connection.execute(
         """
-        CREATE TABLE IF NOT EXISTS invitation_status (
-            record_key TEXT PRIMARY KEY,
+        CREATE TABLE IF NOT EXISTS phones (
+            id INTEGER PRIMARY KEY,
+            name TEXT NOT NULL DEFAULT '',
             phone TEXT NOT NULL,
-            name TEXT NOT NULL,
             source TEXT NOT NULL,
-            sheet_name TEXT NOT NULL,
-            row_number INTEGER NOT NULL,
-            status TEXT NOT NULL,
-            updated_at TEXT NOT NULL,
-            sent_at TEXT,
-            telegram_id INTEGER
+            status TEXT NOT NULL DEFAULT 'PENDING',
+            is_send INTEGER NOT NULL DEFAULT 0 CHECK (is_send IN (0, 1))
         )
-        """
-    )
-    connection.execute(
-        "CREATE INDEX IF NOT EXISTS idx_invitation_status_sent_at ON invitation_status(sent_at)"
-    )
-    connection.execute(
-        """
-        CREATE INDEX IF NOT EXISTS idx_invitation_status_sheet_row
-        ON invitation_status(sheet_name, row_number)
         """
     )
     connection.commit()
     return connection
 
 
-def stored_status(connection: sqlite3.Connection, record_key: str) -> str:
-    row = connection.execute(
-        "SELECT status FROM invitation_status WHERE record_key = ?", (record_key,)
-    ).fetchone()
-    return row[0] if row else ""
+def ensure_indexes(connection: sqlite3.Connection) -> None:
+    connection.execute("CREATE INDEX IF NOT EXISTS idx_phones_source_id ON phones(source, id)")
+    connection.execute("CREATE INDEX IF NOT EXISTS idx_phones_phone ON phones(phone)")
+    connection.execute("CREATE INDEX IF NOT EXISTS idx_phones_status ON phones(status)")
+    connection.commit()
 
 
-def store_status(
-    connection: sqlite3.Connection,
-    contact: ExcelContact | PreparedContact,
-    record_key: str,
-    phone: str,
-    status: str,
-    *,
-    sent_at: str | None = None,
-    telegram_id: int | None = None,
-) -> None:
-    now = timestamp()
-    connection.execute(
+def normalize_database(db_path: Path) -> tuple[int, int, list[tuple[str, int]]]:
+    """Normalize stored numbers and remove rows that are not Iranian mobiles."""
+    if not db_path.is_file():
+        raise ValueError(f"دیتابیس شماره‌ها پیدا نشد: {db_path}")
+    connection = sqlite3.connect(db_path)
+    try:
+        connection.create_function("mobile_phone", 1, normalize_mobile, deterministic=True)
+        with connection:
+            deleted = connection.execute(
+                "DELETE FROM phones WHERE mobile_phone(phone) IS NULL"
+            ).rowcount
+            normalized = connection.execute(
+                "UPDATE phones SET phone = mobile_phone(phone) WHERE phone != mobile_phone(phone)"
+            ).rowcount
+        sources = connection.execute(
+            "SELECT source, COUNT(*) FROM phones GROUP BY source ORDER BY source"
+        ).fetchall()
+        return deleted, normalized, sources
+    finally:
+        connection.close()
+
+
+def excel_phone(value: object) -> str:
+    if value is None or isinstance(value, bool):
+        return ""
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    return clean_text(value)
+
+
+def import_workbook(workbook_path: Path, db_path: Path) -> int:
+    """Load every sheet in one transaction, preserving phone text and leading zeroes."""
+    if not workbook_path.is_file():
+        raise ValueError(f"فایل اکسل پیدا نشد: {workbook_path}")
+    try:
+        from openpyxl import load_workbook
+    except ModuleNotFoundError as error:
+        raise RuntimeError("openpyxl نصب نیست؛ .venv/bin/pip install -e '.[outreach]'") from error
+
+    connection = open_phones_database(db_path)
+    workbook = None
+    try:
+        if connection.execute("SELECT 1 FROM phones LIMIT 1").fetchone():
+            raise ValueError("جدول phones از قبل داده دارد؛ ورود دوباره متوقف شد تا وضعیت‌ها حفظ شوند")
+        workbook = load_workbook(workbook_path, read_only=True, data_only=True)
+        total = 0
+        batch: list[tuple[str, str, str]] = []
+        with connection:
+            for sheet in workbook.worksheets:
+                rows = sheet.iter_rows(values_only=True)
+                header = next(rows, None)
+                if not header:
+                    continue
+                headers = {
+                    normalize_header(value): index
+                    for index, value in enumerate(header)
+                    if normalize_header(value)
+                }
+                name_col = find_column(headers, NAME_HEADERS)
+                phone_col = find_column(headers, PHONE_HEADERS)
+                source_col = find_column(headers, SOURCE_HEADERS)
+                if name_col is None or phone_col is None:
+                    raise ValueError(f"ستون name یا phone در شیت {sheet.title!r} پیدا نشد")
+                for row in rows:
+                    phone = excel_phone(row[phone_col] if phone_col < len(row) else None)
+                    if not phone:
+                        continue
+                    name = clean_text(row[name_col] if name_col < len(row) else None)
+                    source = clean_text(
+                        row[source_col]
+                        if source_col is not None and source_col < len(row)
+                        else None
+                    ) or sheet.title
+                    batch.append((name, phone, source))
+                    if len(batch) >= 5000:
+                        connection.executemany(
+                            "INSERT INTO phones (name, phone, source) VALUES (?, ?, ?)", batch
+                        )
+                        total += len(batch)
+                        batch.clear()
+                        if total % 50000 == 0:
+                            print(f"Imported {total:,} contacts...", flush=True)
+            if batch:
+                connection.executemany(
+                    "INSERT INTO phones (name, phone, source) VALUES (?, ?, ?)", batch
+                )
+                total += len(batch)
+        ensure_indexes(connection)
+        return total
+    finally:
+        if workbook is not None:
+            workbook.close()
+        connection.close()
+
+
+def next_contact(connection: sqlite3.Connection, source: str, after_id: int):
+    return connection.execute(
         """
-        INSERT INTO invitation_status (
-            record_key, phone, name, source, sheet_name, row_number,
-            status, updated_at, sent_at, telegram_id
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(record_key) DO UPDATE SET
-            phone = excluded.phone,
-            name = excluded.name,
-            source = excluded.source,
-            sheet_name = excluded.sheet_name,
-            row_number = excluded.row_number,
-            status = excluded.status,
-            updated_at = excluded.updated_at,
-            sent_at = COALESCE(excluded.sent_at, invitation_status.sent_at),
-            telegram_id = COALESCE(excluded.telegram_id, invitation_status.telegram_id)
+        SELECT id, name, phone FROM phones
+        WHERE source = ? AND id > ? AND (
+            status = 'PENDING' OR status LIKE 'ERROR | %'
+            OR status LIKE 'ERROR_RPC | %' OR status LIKE 'PAUSED_FLOOD_WAIT | %'
+        )
+        ORDER BY id LIMIT 1
         """,
-        (
-            record_key,
-            phone,
-            contact.name,
-            contact.source,
-            contact.sheet_name,
-            contact.row_number,
-            status,
-            now,
-            sent_at,
-            telegram_id,
-        ),
+        (source, after_id),
+    ).fetchone()
+
+
+def set_status(
+    connection: sqlite3.Connection, contact_id: int, status: str, *, is_send: bool = False
+) -> None:
+    connection.execute(
+        "UPDATE phones SET status = ?, is_send = ? WHERE id = ?",
+        (status, int(is_send), contact_id),
     )
     connection.commit()
 
 
-def sent_count_today(connection: sqlite3.Connection, today: str) -> int:
-    return int(
-        connection.execute(
-            "SELECT COUNT(*) FROM invitation_status WHERE substr(sent_at, 1, 10) = ?",
-            (today,),
-        ).fetchone()[0]
-    )
+def sent_count_today(connection: sqlite3.Connection) -> int:
+    day = datetime.now().astimezone().date().isoformat()
+    return int(connection.execute(
+        "SELECT COUNT(*) FROM phones WHERE is_send = 1 AND status LIKE ?",
+        (f"SENT | {day}%",),
+    ).fetchone()[0])
 
 
-def status_reason(status: object) -> str:
-    """Return the stable status category without its timestamp/details."""
-    value = clean_text(status)
-    return value.split("|", 1)[0].strip() or "UNKNOWN"
+def print_delivery_report(connection: sqlite3.Connection, source: str) -> None:
+    rows = connection.execute(
+        """
+        SELECT CASE WHEN instr(status, ' | ') > 0
+                    THEN substr(status, 1, instr(status, ' | ') - 1)
+                    ELSE status END AS reason,
+               COUNT(*)
+        FROM phones WHERE source = ? GROUP BY reason ORDER BY reason
+        """,
+        (source,),
+    ).fetchall()
+    total = sum(count for _, count in rows)
+    sent = next((count for reason, count in rows if reason == "SENT"), 0)
+    print(f"\nگزارش سورس {source}: کل={total:,}، ارسال موفق={sent:,}")
+    for reason, count in rows:
+        print(f"  {reason}: {count:,}")
 
 
-def summarize_delivery(
-    load_workbook: Any,
-    connection: sqlite3.Connection,
-    *,
-    selected_sheet: str | None,
-    limit: int | None,
-) -> DeliveryReport:
-    """Summarize the selected rows using the latest persisted status per contact.
-
-    The workbook is streamed a second time only for the report. This keeps memory
-    bounded even for the million-row segment sheets and makes the report include
-    contacts that were not reached because of the daily limit or a stopped run.
-    """
-    scope: dict[str, int] = {}
-    # When a bounded run is requested, retain exact physical row numbers so a
-    # later report cannot accidentally include a previously processed row past
-    # the current limit (blank phone rows can make row numbers non-contiguous).
-    scope_rows: dict[str, set[int]] | None = {} if limit is not None else None
-    total_users = 0
-    for contact in iter_excel_contacts(
-        load_workbook, selected_sheet=selected_sheet, limit=limit
-    ):
-        total_users += 1
-        scope[contact.sheet_name] = max(scope.get(contact.sheet_name, 0), contact.row_number)
-        if scope_rows is not None:
-            scope_rows.setdefault(contact.sheet_name, set()).add(contact.row_number)
-
-    status_counts: dict[str, int] = {}
-    for sheet_name, last_row in scope.items():
-        if scope_rows is None:
-            rows = connection.execute(
-                """
-                SELECT status, COUNT(*)
-                FROM invitation_status
-                WHERE sheet_name = ? AND row_number <= ?
-                GROUP BY status
-                """,
-                (sheet_name, last_row),
-            ).fetchall()
-            for status, count in rows:
-                reason = status_reason(status)
-                status_counts[reason] = status_counts.get(reason, 0) + int(count)
-        else:
-            rows = connection.execute(
-                """
-                SELECT row_number, status
-                FROM invitation_status
-                WHERE sheet_name = ? AND row_number <= ?
-                """,
-                (sheet_name, last_row),
-            ).fetchall()
-            allowed_rows = scope_rows[sheet_name]
-            for row_number, status in rows:
-                if row_number not in allowed_rows:
-                    continue
-                reason = status_reason(status)
-                status_counts[reason] = status_counts.get(reason, 0) + 1
-
-    sent = sum(count for reason, count in status_counts.items() if reason == "SENT")
-    failed_by_reason = {
-        reason: count
-        for reason, count in sorted(status_counts.items())
-        if reason != "SENT"
-    }
-    failed = sum(failed_by_reason.values())
-    return DeliveryReport(
-        total_users=total_users,
-        sent=sent,
-        failed_by_reason=failed_by_reason,
-        remaining=max(0, total_users - sent - failed),
-    )
-
-
-def print_delivery_report(
-    report: DeliveryReport,
-    *,
-    selected_sheet: str | None,
-    limit: int | None,
-) -> None:
-    scope = selected_sheet or "همهٔ شیت‌ها"
-    bound = f"؛ سقف انتخابی: {limit}" if limit is not None else ""
-    print(f"\nگزارش ارسال | شیت: {scope}{bound}")
-    print(f"کل کاربران در محدوده: {report.total_users}")
-    print(f"ارسال موفق: {report.sent}")
-    print(f"ارسال ناموفق: {report.failed}")
-    if report.failed_by_reason:
-        for reason, count in report.failed_by_reason.items():
-            print(f"  - {reason}: {count}")
-    else:
-        print("  - بدون خطا")
-    print(f"باقی‌مانده و ارسال‌نشده: {report.remaining}")
-
-
-def iter_excel_contacts(
-    load_workbook: Any,
-    *,
-    selected_sheet: str | None = None,
-    limit: int | None = None,
-) -> Iterator[ExcelContact]:
-    workbook = load_workbook(INPUT_WORKBOOK, read_only=True, data_only=True)
-    sequence = 0
-    selected_sheet_found = False
-    selected_records = 0
+def load_dependencies():
     try:
-        for worksheet in workbook.worksheets:
-            if selected_sheet is not None and worksheet.title != selected_sheet:
-                continue
-            selected_sheet_found = True
-            rows = worksheet.iter_rows(values_only=True)
-            header = next(rows, None)
-            if not header:
-                continue
-            headers = header_map(tuple(header))
-            name_column = find_column(headers, NAME_HEADERS)
-            phone_column = find_column(headers, PHONE_HEADERS)
-            source_column = find_column(headers, SOURCE_HEADERS)
-            if name_column is None:
-                raise ValueError(f"ستون name در شیت {worksheet.title!r} پیدا نشد")
-            if phone_column is None:
-                raise ValueError(f"ستون phone در شیت {worksheet.title!r} پیدا نشد")
-
-            for row_number, row in enumerate(rows, start=2):
-                raw_phone = row[phone_column] if phone_column < len(row) else None
-                if raw_phone in (None, ""):
-                    continue
-                if limit is not None and selected_records >= limit:
-                    break
-                sequence += 1
-                selected_records += 1
-                name = clean_text(row[name_column] if name_column < len(row) else None)
-                source = clean_text(
-                    row[source_column]
-                    if source_column is not None and source_column < len(row)
-                    else ""
-                )
-                yield ExcelContact(
-                    sequence=sequence,
-                    sheet_name=worksheet.title,
-                    row_number=row_number,
-                    name=name,
-                    raw_phone=raw_phone,
-                    source=source,
-                )
-            if selected_sheet is not None:
-                break
-        if selected_sheet is not None and not selected_sheet_found:
-            raise ValueError(f"شیت {selected_sheet!r} در فایل اکسل پیدا نشد")
-    finally:
-        workbook.close()
+        from telethon import TelegramClient, errors
+        from telethon.tl.functions.contacts import ImportContactsRequest
+        from telethon.tl.types import InputPhoneContact
+    except ModuleNotFoundError as error:
+        raise RuntimeError("Telethon نصب نیست؛ .venv/bin/pip install -e '.[outreach]'") from error
+    return TelegramClient, errors, ImportContactsRequest, InputPhoneContact
 
 
-def iter_ready_contacts(
-    contacts: Iterator[ExcelContact],
-    connection: sqlite3.Connection,
-    default_country_code: str,
-    *,
-    persist_invalid: bool,
-) -> Iterator[PreparedContact]:
-    for contact in contacts:
-        try:
-            phone = normalize_phone(contact.raw_phone, default_country_code)
-        except ValueError as error:
-            record_key = f"invalid:{contact.sheet_name}:{contact.row_number}"
-            if status_is_terminal(stored_status(connection, record_key)):
-                continue
-            if persist_invalid:
-                store_status(
-                    connection,
-                    contact,
-                    record_key,
-                    "",
-                    f"INVALID_PHONE | {safe_error(error)} | {timestamp()}",
-                )
-            continue
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="ورود شماره‌ها و ارسال دعوت از phones.sqlite3")
+    actions = parser.add_mutually_exclusive_group()
+    actions.add_argument("--import-excel", action="store_true", help="ورود یک‌بارهٔ همهٔ شیت‌های اکسل")
+    actions.add_argument("--normalize-phones", action="store_true", help="یکسان‌سازی شماره‌ها و حذف نامعتبرها")
+    parser.add_argument("--db", type=Path, default=DEFAULT_PHONES_DB)
+    parser.add_argument("--source", default=os.getenv("OUTREACH_SOURCE"))
+    parser.add_argument("--count", type=int, default=None)
+    parser.add_argument("--api-id", type=int, default=os.getenv("TELEGRAM_API_ID"))
+    parser.add_argument("--api-hash", default=os.getenv("TELEGRAM_API_HASH"))
+    parser.add_argument("--phone", default=os.getenv("OUTREACH_PHONE"))
+    parser.add_argument(
+        "--session", type=Path, default=Path(os.getenv("OUTREACH_SESSION", "data/outreach/account"))
+    )
+    parser.add_argument(
+        "--bot-link", default=os.getenv("OUTREACH_BOT_LINK", "https://t.me/bazi_chi_admin")
+    )
+    parser.add_argument("--default-country-code", default="+98")
+    parser.add_argument("--delay", type=float, default=120)
+    parser.add_argument("--max-per-day", type=int, default=20)
+    parser.add_argument("--dry-run", action="store_true", help="نمایش حداکثر پنج مخاطب و متن پیام")
+    return parser.parse_args()
 
-        if status_is_terminal(stored_status(connection, phone)):
-            continue
-        yield PreparedContact(
-            sequence=contact.sequence,
-            sheet_name=contact.sheet_name,
-            row_number=contact.row_number,
-            name=contact.name,
-            phone=phone,
-            source=contact.source,
-        )
+
+def validate_args(args: argparse.Namespace) -> None:
+    if not CONSENT:
+        raise ValueError("CONSENT باید صریحاً True باشد")
+    if args.import_excel or getattr(args, "normalize_phones", False):
+        return
+    args.source = clean_text(args.source)
+    if not args.source:
+        raise ValueError("--source الزامی است")
+    if args.count is None or args.count < 1:
+        raise ValueError("--count باید عددی بزرگ‌تر از صفر باشد")
+    if not args.db.is_file():
+        raise ValueError(f"دیتابیس شماره‌ها پیدا نشد: {args.db}؛ ابتدا --import-excel را اجرا کن")
+    args.bot_link = validate_bot_link(args.bot_link)
+    normalize_country_code(args.default_country_code)
+    if args.delay < 30:
+        raise ValueError("فاصلهٔ ارسال باید حداقل ۳۰ ثانیه باشد")
+    if not 1 <= args.max_per_day <= 100:
+        raise ValueError("max-per-day باید بین ۱ و ۱۰۰ باشد")
+    if not args.dry_run and (not args.api_id or not args.api_hash):
+        raise ValueError("TELEGRAM_API_ID و TELEGRAM_API_HASH الزامی هستند")
 
 
 async def run(args: argparse.Namespace) -> int:
     validate_args(args)
-    load_workbook, TelegramClient, errors, contact_types = load_dependencies()
-    ImportContactsRequest, InputPhoneContact = contact_types
-    selected_sheet = getattr(args, "sheet_name", None)
-    selected_count = getattr(args, "count", None)
+    if args.import_excel:
+        total = import_workbook(INPUT_WORKBOOK, args.db)
+        print(f"Imported {total:,} contacts into {args.db}; normalizing...", flush=True)
+        deleted, normalized, sources = normalize_database(args.db)
+        print(f"Deleted {deleted:,} invalid contacts; normalized {normalized:,} numbers")
+        for source, count in sources:
+            print(f"  {source}: {count:,}")
+        return 0
+    if getattr(args, "normalize_phones", False):
+        deleted, normalized, sources = normalize_database(args.db)
+        print(f"Deleted {deleted:,} invalid contacts; normalized {normalized:,} numbers")
+        for source, count in sources:
+            print(f"  {source}: {count:,}")
+        return 0
 
-    state_path: Path | str = ":memory:" if args.dry_run else args.state_db
-    state = open_state_database(state_path)
-    contacts = iter_excel_contacts(
-        load_workbook,
-        selected_sheet=selected_sheet,
-        limit=selected_count,
-    )
-    ready = iter_ready_contacts(
-        contacts,
-        state,
-        args.default_country_code,
-        persist_invalid=not args.dry_run,
-    )
-
-    if args.dry_run:
-        try:
-            preview = []
-            for contact in ready:
-                preview.append(contact)
-                if len(preview) >= 5:
+    connection = sqlite3.connect(args.db)
+    try:
+        if args.dry_run:
+            print(f"DB: {args.db}; source={args.source}")
+            last_id = 0
+            for _ in range(min(args.count, 5)):
+                contact = next_contact(connection, args.source, last_id)
+                if contact is None:
                     break
-            print(f"Input: {INPUT_WORKBOOK}")
-            print(f"CONSENT={CONSENT}; preview_ready={len(preview)}")
-            for contact in preview:
-                print(
-                    f"\n--- {contact.sheet_name} row {contact.row_number} / "
-                    f"{mask_phone(contact.phone)} / source={contact.source or '-'} ---"
-                )
-                print(create_message(contact.name, args.bot_link))
-            ready.close()
-            contacts.close()
-            print_delivery_report(
-                summarize_delivery(
-                    load_workbook,
-                    state,
-                    selected_sheet=selected_sheet,
-                    limit=selected_count,
-                ),
-                selected_sheet=selected_sheet,
-                limit=selected_count,
-            )
+                contact_id, name, raw_phone = contact
+                last_id = contact_id
+                print(f"\n--- id={contact_id} / {mask_phone(raw_phone)} ---")
+                print(create_message(name, args.bot_link))
+            print_delivery_report(connection, args.source)
             return 0
-        finally:
-            ready.close()
-            contacts.close()
-            state.close()
 
-    today = datetime.now().astimezone().date().isoformat()
-    sent_count = sent_count_today(state, today)
-    if sent_count >= args.max_per_day:
-        print(f"سقف امروز قبلاً پر شده است: {sent_count}/{args.max_per_day}")
-        ready.close()
-        contacts.close()
-        print_delivery_report(
-            summarize_delivery(
-                load_workbook,
-                state,
-                selected_sheet=selected_sheet,
-                limit=selected_count,
-            ),
-            selected_sheet=selected_sheet,
-            limit=selected_count,
+        first_contact = next_contact(connection, args.source, 0)
+        if first_contact is None:
+            print("هیچ مخاطب تازه‌ای برای این سورس باقی نمانده است.")
+            print_delivery_report(connection, args.source)
+            return 0
+        sent_today = sent_count_today(connection)
+        if sent_today >= args.max_per_day:
+            print(f"سقف امروز پر شده است: {sent_today}/{args.max_per_day}")
+            print_delivery_report(connection, args.source)
+            return 0
+
+        TelegramClient, errors, ImportContactsRequest, InputPhoneContact = load_dependencies()
+        args.session.parent.mkdir(parents=True, exist_ok=True)
+        client = TelegramClient(
+            str(args.session), int(args.api_id), args.api_hash,
+            flood_sleep_threshold=0, request_retries=1,
         )
-        state.close()
-        return 0
+        try:
+            if args.phone:
+                await client.start(phone=args.phone)
+            else:
+                await client.start()
+            me = await client.get_me()
+            print(f"Telegram connected: id={me.id}; source={args.source}; count={args.count}")
+            consecutive_errors = 0
+            contact = first_contact
+            attempted = 0
+            last_id = 0
+            requests_made = False
+            while contact is not None and attempted < args.count:
+                if sent_today >= args.max_per_day:
+                    print(f"سقف روزانه پر شد: {sent_today}/{args.max_per_day}")
+                    break
+                contact_id, name, raw_phone = contact
+                last_id = contact_id
+                attempted += 1
+                try:
+                    phone = normalize_phone(raw_phone, args.default_country_code)
+                except ValueError as error:
+                    set_status(connection, contact_id, f"INVALID_PHONE | {safe_error(error)} | {timestamp()}")
+                    contact = next_contact(connection, args.source, last_id)
+                    continue
 
-    try:
-        first_contact = next(ready, None)
-    except BaseException:
-        ready.close()
-        contacts.close()
-        state.close()
-        raise
-    if first_contact is None:
-        print("هیچ مخاطب تازه‌ای برای بررسی باقی نمانده است.")
-        ready.close()
-        contacts.close()
-        print_delivery_report(
-            summarize_delivery(
-                load_workbook,
-                state,
-                selected_sheet=selected_sheet,
-                limit=selected_count,
-            ),
-            selected_sheet=selected_sheet,
-            limit=selected_count,
-        )
-        state.close()
-        return 0
+                # The original number remains in the table; avoid a second send for
+                # an exact matching number in another row or source.
+                duplicate = connection.execute(
+                    "SELECT 1 FROM phones WHERE phone = ? AND id <> ? AND is_send = 1 LIMIT 1",
+                    (raw_phone, contact_id),
+                ).fetchone()
+                if duplicate:
+                    set_status(connection, contact_id, f"DUPLICATE_SENT | {timestamp()}")
+                    contact = next_contact(connection, args.source, last_id)
+                    continue
 
-    args.session.parent.mkdir(parents=True, exist_ok=True)
-    client = TelegramClient(
-        str(args.session),
-        int(args.api_id),
-        args.api_hash,
-        flood_sleep_threshold=0,
-        request_retries=1,
-    )
-    consecutive_errors = 0
-    current: PreparedContact | None = first_contact
-    report: DeliveryReport | None = None
-    try:
-        if args.phone:
-            await client.start(phone=args.phone)
-        else:
-            await client.start()
-        me = await client.get_me()
-        print(
-            f"Telegram connected: id={me.id}; input={INPUT_WORKBOOK.name}; "
-            f"CONSENT={CONSENT}; sent_today={sent_count}"
-        )
-
-        while current is not None:
-            if sent_count >= args.max_per_day:
-                print(f"سقف روزانه پر شد: {sent_count}/{args.max_per_day}")
-                break
-            print(
-                f"[CHECK] sheet={current.sheet_name} row={current.row_number} "
-                f"phone={mask_phone(current.phone)}"
-            )
-            should_stop = False
-            try:
-                result = await client(
-                    ImportContactsRequest(
-                        [
+                if requests_made:
+                    print(f"[WAIT] {args.delay:.0f}s")
+                    await asyncio.sleep(args.delay)
+                print(f"[CHECK] id={contact_id} phone={mask_phone(phone)}")
+                set_status(connection, contact_id, f"SENDING | {timestamp()}")
+                requests_made = True
+                should_stop = False
+                try:
+                    result = await client(
+                        ImportContactsRequest([
                             InputPhoneContact(
-                                client_id=current.sequence,
-                                phone=current.phone,
-                                first_name=current.name or "مخاطب",
-                                last_name="",
+                                client_id=contact_id, phone=phone,
+                                first_name=name or "مخاطب", last_name="",
                             )
-                        ]
+                        ])
                     )
-                )
-                if not result.users:
-                    store_status(
-                        state,
-                        current,
-                        current.record_key,
-                        current.phone,
-                        f"NOT_ON_TELEGRAM | {timestamp()}",
-                    )
-                    print(f"[NOT ON TELEGRAM] {current.sheet_name} row={current.row_number}")
+                    if not result.users:
+                        set_status(connection, contact_id, f"NOT_ON_TELEGRAM | {timestamp()}")
+                        print(f"[NOT ON TELEGRAM] id={contact_id}")
+                    else:
+                        user = result.users[0]
+                        await client.send_message(
+                            user, create_message(name, args.bot_link),
+                            link_preview=False, parse_mode=None,
+                        )
+                        set_status(connection, contact_id, f"SENT | {timestamp()}", is_send=True)
+                        sent_today += 1
+                        print(f"[SENT] id={contact_id}; today={sent_today}/{args.max_per_day}")
                     consecutive_errors = 0
-                else:
-                    user = result.users[0]
-                    await client.send_message(
-                        user,
-                        create_message(current.name, args.bot_link),
-                        link_preview=False,
-                        parse_mode=None,
-                    )
-                    sent_at = timestamp()
-                    store_status(
-                        state,
-                        current,
-                        current.record_key,
-                        current.phone,
-                        f"SENT | {sent_at} | telegram_id={user.id}",
-                        sent_at=sent_at,
-                        telegram_id=user.id,
-                    )
-                    sent_count += 1
+                except errors.FloodWaitError as error:
+                    seconds = int(getattr(error, "seconds", 0))
+                    set_status(connection, contact_id, f"PAUSED_FLOOD_WAIT | retry_after={seconds}s | {timestamp()}")
+                    print(f"[STOP] Telegram requested FloodWait({seconds}s).")
+                    should_stop = True
+                except errors.PeerFloodError as error:
+                    set_status(connection, contact_id, f"STOPPED_SPAM_RESTRICTION | {safe_error(error)} | {timestamp()}")
+                    print("[STOP] Telegram reported an account spam restriction.")
+                    should_stop = True
+                except errors.UserPrivacyRestrictedError as error:
+                    set_status(connection, contact_id, f"NOT_SENT_PRIVACY | {safe_error(error)} | {timestamp()}")
                     consecutive_errors = 0
-                    print(f"[SENT] today={sent_count}/{args.max_per_day}")
-            except errors.FloodWaitError as error:
-                seconds = int(getattr(error, "seconds", 0))
-                store_status(
-                    state,
-                    current,
-                    current.record_key,
-                    current.phone,
-                    f"PAUSED_FLOOD_WAIT | retry_after={seconds}s | {timestamp()}",
-                )
-                print(f"[STOP] Telegram requested FloodWait({seconds}s); no automatic retry.")
-                should_stop = True
-            except errors.PeerFloodError as error:
-                store_status(
-                    state,
-                    current,
-                    current.record_key,
-                    current.phone,
-                    f"STOPPED_SPAM_RESTRICTION | {safe_error(error)} | {timestamp()}",
-                )
-                print("[STOP] Telegram reported an account spam restriction.")
-                should_stop = True
-            except errors.UserPrivacyRestrictedError as error:
-                store_status(
-                    state,
-                    current,
-                    current.record_key,
-                    current.phone,
-                    f"NOT_SENT_PRIVACY | {safe_error(error)} | {timestamp()}",
-                )
-                consecutive_errors = 0
-                print(f"[PRIVACY] {current.sheet_name} row={current.row_number}")
-            except errors.RPCError as error:
-                store_status(
-                    state,
-                    current,
-                    current.record_key,
-                    current.phone,
-                    f"ERROR_RPC | {safe_error(error)} | {timestamp()}",
-                )
-                consecutive_errors += 1
-                print(f"[RPC ERROR] {safe_error(error)}")
-            except Exception as error:
-                store_status(
-                    state,
-                    current,
-                    current.record_key,
-                    current.phone,
-                    f"ERROR | {safe_error(error)} | {timestamp()}",
-                )
-                consecutive_errors += 1
-                print(f"[ERROR] {safe_error(error)}")
+                except errors.RPCError as error:
+                    set_status(connection, contact_id, f"ERROR_RPC | {safe_error(error)} | {timestamp()}")
+                    consecutive_errors += 1
+                    print(f"[RPC ERROR] id={contact_id}: {safe_error(error)}")
+                except Exception as error:  # noqa: BLE001 - persist unexpected delivery failures
+                    set_status(connection, contact_id, f"ERROR | {safe_error(error)} | {timestamp()}")
+                    consecutive_errors += 1
+                    print(f"[ERROR] id={contact_id}: {safe_error(error)}")
 
-            if should_stop:
-                break
-            if consecutive_errors >= 3:
-                print("[STOP] Three consecutive errors; inspect the state database.")
-                break
-            if sent_count >= args.max_per_day:
-                print(f"سقف روزانه پر شد: {sent_count}/{args.max_per_day}")
-                break
+                if should_stop or consecutive_errors >= 3:
+                    if consecutive_errors >= 3:
+                        print("[STOP] Three consecutive errors; inspect phones.sqlite3.")
+                    break
+                contact = next_contact(connection, args.source, last_id)
+        finally:
+            await client.disconnect()
 
-            next_contact = next(ready, None)
-            if next_contact is None:
-                break
-            print(f"[WAIT] {args.delay:.0f}s")
-            await asyncio.sleep(args.delay)
-            current = next_contact
+        print_delivery_report(connection, args.source)
+        return 0
     finally:
-        await client.disconnect()
-        ready.close()
-        contacts.close()
-        report = summarize_delivery(
-            load_workbook,
-            state,
-            selected_sheet=selected_sheet,
-            limit=selected_count,
-        )
-        state.close()
-
-    print(f"State database: {args.state_db}; sent_today={sent_count}/{args.max_per_day}")
-    assert report is not None
-    print_delivery_report(report, selected_sheet=selected_sheet, limit=selected_count)
-    return 0
+        connection.close()
 
 
 def main() -> int:
@@ -855,7 +514,7 @@ def main() -> int:
         print(f"خطا: {error}", file=sys.stderr)
         return 2
     except KeyboardInterrupt:
-        print("\nمتوقف شد؛ نتیجه‌های قبلی در دیتابیس وضعیت ذخیره شده‌اند.", file=sys.stderr)
+        print("\nمتوقف شد؛ نتیجه‌های ثبت‌شده در phones.sqlite3 مانده‌اند.", file=sys.stderr)
         return 130
 
 

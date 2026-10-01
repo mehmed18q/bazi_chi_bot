@@ -14,3 +14,4 @@ build/
 *.egg-info/
 data/
 .idea/
+/scripts/send_opt_in_invitations.py

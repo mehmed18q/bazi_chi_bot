@@ -35,7 +35,7 @@ Python 3.14 لازم است.
 
 ```bash
 python3.14 -m venv .venv
-.venv/bin/pip install -e '.[test]'
+.venv/bin/pip install -e '.[test,outreach]'
 cp .env.example .env
 # BOT_TOKEN را در .env قرار دهید
 .venv/bin/bazi_chi_bot
@@ -129,62 +129,62 @@ V2Ray/Clash/sing-box را مستقیم داخل این آرایه نگذارید
 پیام ارسال می‌شود. زمان‌بندی در SQLite ذخیره شده و بعد از راه‌اندازی مجدد ادامه پیدا می‌کند.
 در هر بار راه‌اندازی ربات نیز برای همهٔ شمارش‌معکوس‌های فعال یک پیام فوری فرستاده می‌شود.
 
-## دعوت کاربران رضایت‌داده از اکسل
+## دعوت کاربران رضایت‌داده
 
-ابزار مستقل `scripts/send_opt_in_invitations.py` برای فهرستی است که کاربران آن قبلاً
-صریحاً دریافت پیام را پذیرفته‌اند. ورودی ابزار عمداً و به‌صورت ثابت روی فایل
-`phones/all_phones.xlsx` قرار دارد و مقدار `CONSENT` برای همهٔ ردیف‌های آن
-`True` است. هر سگمنتِ ستون `source` در یک شیت جداگانه قرار گرفته و شیت‌ها بر اساس تعداد
-رکورد از کم به زیاد مرتب شده‌اند. ابزار ستون‌های `name`، `phone` و `source` را به‌صورت
-جریانی می‌خواند؛ نام می‌تواند خالی باشد.
-
-فایل بزرگ اکسل هرگز تغییر نمی‌کند. نتیجهٔ هر بررسی یا ارسال در
-`data/outreach/invitations.sqlite3` ذخیره می‌شود تا اجرای بعدی شماره‌های نهایی‌شده را
-دوباره پردازش نکند. وضعیت‌هایی مانند `SENT`، `NOT_ON_TELEGRAM`، `UNSUBSCRIBED` و خطاها
-همراه زمان، شیت، ردیف و منبع مخاطب در همین دیتابیس می‌مانند.
-
-وابستگی‌های جداگانهٔ ابزار را نصب کنید و اطلاعات API اکانت را از
-`my.telegram.org` بگیرید:
+ابزار مستقل `scripts/send_opt_in_invitations.py` شماره‌های فایل
+`phones/all_phones.xlsx` را یک بار به دیتابیس مستقل `data/phones.sqlite3` وارد می‌کند.
+این دیتابیس جدا از `data/bazi_chi_bot.sqlite3` ربات است. جدول `phones` ستون‌های
+`id`, `name`, `phone`, `source`, `status`, `is_send` دارد؛ شماره و نتیجهٔ ارسال در یک ردیف
+هستند. شماره‌ها به قالب `09xxxxxxxxx` یکسان می‌شوند؛ شماره‌های `9xxxxxxxxx`،
+`+989xxxxxxxxx` و `00989xxxxxxxxx` هم به همین قالب تبدیل می‌شوند. ردیف‌هایی که پس از
+پاک‌سازی شمارهٔ موبایل ۱۱ رقمی ندارند حذف می‌شوند.
+برای شیتی که ستون `source` ندارد، نام شیت به‌عنوان سورس ثبت می‌شود. فایل اکسل بعد از
+ورود داده دیگر در زمان ارسال خوانده نمی‌شود.
 
 ```bash
 .venv/bin/pip install -e '.[outreach]'
-export TELEGRAM_API_ID=12345678
-export TELEGRAM_API_HASH='your_api_hash'
-export OUTREACH_PHONE='+989121234567'
-export OUTREACH_BOT_LINK='https://t.me/YourBotUsername'
+.venv/bin/python scripts/send_opt_in_invitations.py --import-excel
 ```
 
-ابتدا فایل و متن شخصی‌سازی‌شده را بدون اتصال به تلگرام بررسی کنید:
+برای پاک‌سازی دیتابیس موجود بدون ورود دوبارهٔ اکسل:
 
 ```bash
-.venv/bin/python scripts/send_opt_in_invitations.py \
-  --dry-run
+.venv/bin/python scripts/send_opt_in_invitations.py --normalize-phones
 ```
 
-برای ارسال فقط از یک شیت و تعداد مشخصی رکورد، نام شیت و سقف رکورد را بدهید (گزینهٔ
-`--sheet-name` هم‌نام `--sheet` است):
+هر دو دستور در پایان، تعداد ردیف‌های باقی‌ماندهٔ هر سورس را چاپ می‌کنند. ورود مجدد به
+جدول پُر متوقف می‌شود تا وضعیت‌های ثبت‌شده از بین نروند. برای اتصال اکانت
+تلگرام، `TELEGRAM_API_ID` و `TELEGRAM_API_HASH` و در صورت نیاز `OUTREACH_PHONE` را تنظیم
+کنید. لینک دعوت را با `OUTREACH_BOT_LINK` یا `--bot-link` تعیین کنید.
+
+پیش‌نمایش بدون اتصال به تلگرام:
 
 ```bash
-.venv/bin/python scripts/send_opt_in_invitations.py \
-  --sheet vendor_user \
-  --count 100
+.venv/bin/python scripts/send_opt_in_invitations.py --source test --count 1 --dry-run
 ```
 
-سپس ارسال واقعی را آغاز کنید:
+ارسال واقعی برای یک سورس و تعداد مشخصی ردیفِ در انتظار:
 
 ```bash
-.venv/bin/python scripts/send_opt_in_invitations.py
+.venv/bin/python scripts/send_opt_in_invitations.py --source test --count 1
+.venv/bin/python scripts/send_opt_in_invitations.py --source vendor_user --count 20
 ```
 
-در پایان هر اجرا، گزارش همان محدوده چاپ می‌شود: کل کاربران، ارسال‌های موفق، ارسال‌های
-ناموفق به تفکیک وضعیت/دلیل و باقی‌ماندهٔ ارسال‌نشده. در اجرای اول، کد ورود تلگرام و در
-صورت فعال‌بودن رمز دومرحله‌ای پرسیده می‌شود؛ session در `data/outreach/` می‌ماند.
-نتیجه بعد از هر مخاطب در دیتابیس وضعیت ذخیره می‌شود؛ اجرای بعدی ردیف‌های نهایی‌شده را
-تکرار نمی‌کند. پیش‌فرض ابزار
-حداکثر ۲۰ ارسال موفق در روز با فاصلهٔ ثابت ۱۲۰
-ثانیه است. این اعداد تضمین جلوگیری از محدودیت تلگرام نیستند. روی `FloodWait` یا محدودیت
-اسپم، ابزار بدون تلاش مجدد متوقف می‌شود. پاسخ «لغو» باید محترم شمرده شود و وضعیت آن
-ردیف در اکسل به `UNSUBSCRIBED` تغییر کند.
+`--count` تعداد ردیف‌هایی است که در این اجرا بررسی می‌شوند. پس از هر بررسی، `status`
+در همان ردیف به‌روز می‌شود؛ `is_send=1` فقط برای ارسال موفق است. وضعیت‌های نهایی در
+اجرای بعدی تکرار نمی‌شوند و خطاهای موقت قابل تلاش دوباره‌اند. وضعیت `SENDING` پس از
+وقفهٔ ناگهانی خودکار تکرار نمی‌شود تا پیام احتمالی دوباره ارسال نشود؛ آن ردیف را پس از
+بررسی دستی تعیین تکلیف کنید. سقف پیش‌فرض ۲۰ ارسال موفق در روز و فاصلهٔ پیش‌فرض ۱۲۰ ثانیه
+است. روی `FloodWait` یا محدودیت اسپم، اجرا متوقف می‌شود.
+
+برای دیدن وضعیت‌ها و شمارهٔ تست:
+
+```sql
+SELECT source, status, COUNT(*) FROM phones GROUP BY source, status;
+SELECT source, COUNT(*) FROM phones GROUP BY source ORDER BY source;
+SELECT id, name, phone, source, status, is_send FROM phones WHERE source = 'test';
+UPDATE phones SET status = 'UNSUBSCRIBED', is_send = 0 WHERE phone = '09217074647';
+```
 
 ## تست
 
