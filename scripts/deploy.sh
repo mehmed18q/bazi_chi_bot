@@ -15,6 +15,8 @@ previous_commit=""
 service_touched=0
 was_active=0
 unit_changed=0
+redeploy_current=0
+dependency_install_started=0
 
 log() { printf '%s\n' "$*"; }
 die() { printf 'Error: %s\n' "$*" >&2; exit 1; }
@@ -24,6 +26,14 @@ as_root() {
         "$@"
     else
         sudo env LC_MESSAGES=C "$@"
+    fi
+}
+
+install_dependencies() {
+    if [[ -x .venv/bin/pip ]]; then
+        .venv/bin/pip install -e '.[test,outreach]'
+    else
+        uv pip install --python .venv/bin/python -e '.[test,outreach]'
     fi
 }
 
@@ -37,7 +47,8 @@ on_exit() {
     set +e
     if (( service_touched == 1 )); then
         current_commit="$(git rev-parse HEAD 2>/dev/null)"
-        if [[ -n "$previous_commit" && "$current_commit" == "$previous_commit" &&
+        if (( redeploy_current == 0 && dependency_install_started == 0 )) &&
+           [[ -n "$previous_commit" && "$current_commit" == "$previous_commit" &&
               -z "$(git status --porcelain 2>/dev/null)" ]]; then
             if (( was_active == 1 )); then
                 log "The code was not updated; attempting to restart the previous service..." >&2
@@ -86,8 +97,11 @@ fi
     die "Check out the master branch before deploying."
 [[ -z "$(git status --porcelain)" ]] ||
     die "The working tree has local changes or untracked files; review them first."
-[[ -x .venv/bin/python && -x .venv/bin/pip ]] ||
-    die "The .venv virtual environment is not ready."
+[[ -x .venv/bin/python ]] || die "The .venv Python interpreter is not ready."
+if [[ ! -x .venv/bin/pip ]]; then
+    command -v uv >/dev/null ||
+        die "Neither .venv/bin/pip nor uv is available to install dependencies."
+fi
 .venv/bin/python -c 'import sys; raise SystemExit(sys.version_info < (3, 14))' ||
     die "The virtual environment requires Python 3.14 or newer."
 as_root test -f .env || die "The .env file is missing."
@@ -109,11 +123,12 @@ git cat-file -e "$target_commit:pyproject.toml" ||
 git cat-file -e "$target_commit:bazi_chi_bot.service" ||
     die "The target revision does not contain the systemd unit file."
 if [[ "$previous_commit" == "$target_commit" ]]; then
-    log "master is already up to date; the service was not changed."
-    exit 0
+    redeploy_current=1
+    log "master is already up to date; redeploying the current revision."
+else
+    log "Revision: $previous_commit -> $target_commit"
+    git diff --stat "$previous_commit" "$target_commit"
 fi
-log "Revision: $previous_commit -> $target_commit"
-git diff --stat "$previous_commit" "$target_commit"
 
 if ! git diff --quiet "$previous_commit" "$target_commit" -- bazi_chi_bot.service; then
     unit_changed=1
@@ -135,7 +150,7 @@ if ! as_root test -d "$backup_parent"; then
 fi
 backup_stamp="$(date -u +%Y-%m-%dT%H-%M-%S.%NZ)"
 backup_dir="$(as_root mktemp -d "$backup_parent/deploy-${backup_stamp}.XXXXXX")"
-database_backup_path="$backup_parent/bazi_chi_bot_${backup_stamp}.sqlite3"
+database_backup_path="$backup_parent/bazi_chi_bot(${backup_stamp}).sqlite3"
 printf '%s\n' "$previous_commit" | as_root tee "$backup_dir/previous-commit.txt" >/dev/null
 as_root chmod 0600 "$backup_dir/previous-commit.txt"
 as_root install -m 0600 .env "$backup_dir/.env"
@@ -172,8 +187,11 @@ printf '%s\n' "$database_backup_path" | as_root tee "$backup_dir/database-backup
 as_root chmod 0600 "$backup_dir/database-backup-path.txt"
 
 log "Applying the update and installing dependencies..."
-git merge --ff-only "$target_commit"
-.venv/bin/pip install -e '.[test,outreach]'
+if (( redeploy_current == 0 )); then
+    git merge --ff-only "$target_commit"
+fi
+dependency_install_started=1
+install_dependencies
 
 log "Running tests and checking the configured question bank..."
 .venv/bin/pytest -q --ignore=tests/test_question_bank.py
@@ -208,7 +226,11 @@ sleep 3
 as_root systemctl is-active --quiet "$service_name" || die "The service did not remain active after starting."
 as_root journalctl -u "$service_name" -n 30 --no-pager ||
     log "Warning: Could not read the logs; check the service status separately."
-log "Deployment completed: $previous_commit -> $target_commit"
+if (( redeploy_current == 1 )); then
+    log "Redeployment completed: $target_commit"
+else
+    log "Deployment completed: $previous_commit -> $target_commit"
+fi
 log "Deployment metadata backup: $backup_dir"
 log "Database backup: $database_backup_path"
 log "Also verify /start and a game interaction in Telegram."
