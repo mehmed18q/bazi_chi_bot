@@ -83,6 +83,8 @@ def _game_from_row(row: aiosqlite.Row) -> Game:
         daily_challenge_date=row["daily_challenge_date"],
         rps_creator_move=row["rps_creator_move"],
         rps_player2_move=row["rps_player2_move"],
+        tournament_id=row["tournament_id"],
+        tournament_stage=row["tournament_stage"],
     )
 
 

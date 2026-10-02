@@ -187,6 +187,12 @@ class MatchService:
             )
             if cursor.rowcount != 1:
                 raise InviteUnavailable
+            if game.tournament_id is not None:
+                await connection.execute(
+                    """UPDATE tournaments SET player2_id = ?, status = 'active', updated_at = ?
+                       WHERE id = ? AND status = 'waiting' AND current_game_id = ?""",
+                    (player_id, now, game.tournament_id, game.id),
+                )
             updated = await (
                 await connection.execute("SELECT * FROM games WHERE id = ?", (game.id,))
             ).fetchone()
@@ -321,6 +327,12 @@ class MatchService:
                 (now, game.id, game.version),
             )
             updated = await _locked_game(connection, game.id)
+            if game.tournament_id is not None:
+                await connection.execute(
+                    """UPDATE tournaments SET status = 'cancelled', updated_at = ?
+                       WHERE id = ? AND status = 'waiting'""",
+                    (now, game.tournament_id),
+                )
         return updated
 
     async def hide_fist(self, game_id: int, user_id: int, fist: int, expected_version: int) -> Game:
@@ -394,8 +406,8 @@ class MatchService:
                         player2_score,
                         winner_id,
                         loser_id,
-                        "finished" if game.is_solo else "choice",
-                        "finished" if game.is_solo else "choice",
+                        "finished" if game.is_solo or game.tournament_id else "choice",
+                        "finished" if game.is_solo or game.tournament_id else "choice",
                         now,
                         game.id,
                         game.version,
@@ -512,9 +524,9 @@ class MatchService:
                     None if not finished else creator_move,
                     next_bot_move if not finished else player2_move,
                     winner_id, loser_id,
-                    ("finished" if game.is_solo or winner_id is None else "choice")
+                    ("finished" if game.is_solo or game.tournament_id or winner_id is None else "choice")
                     if finished else "active",
-                    ("finished" if game.is_solo or winner_id is None else "choice")
+                    ("finished" if game.is_solo or game.tournament_id or winner_id is None else "choice")
                     if finished else "guessing",
                     now, game.id, game.version,
                 ),
@@ -636,8 +648,8 @@ class MatchService:
                         player2_score,
                         winner_id,
                         loser_id,
-                        "finished" if game.is_solo else "choice",
-                        "finished" if game.is_solo else "choice",
+                        "finished" if game.is_solo or game.tournament_id else "choice",
+                        "finished" if game.is_solo or game.tournament_id else "choice",
                         now,
                         game.id,
                         game.version,
@@ -786,8 +798,8 @@ class MatchService:
                     player2_score,
                     winner_id,
                     loser_id,
-                    "finished" if game.is_solo else "choice",
-                    "finished" if game.is_solo else "choice",
+                    "finished" if game.is_solo or game.tournament_id else "choice",
+                    "finished" if game.is_solo or game.tournament_id else "choice",
                     now,
                     game.id,
                     game.version,
@@ -965,8 +977,8 @@ class MatchService:
                     score1,
                     score2,
                     game.hand_number + int((round_finished if game.is_solo else won) and not finished),
-                    ("finished" if game.is_solo else "choice") if finished else "active",
-                    ("finished" if game.is_solo else "choice") if finished else "guessing",
+                    ("finished" if game.is_solo or game.tournament_id else "choice") if finished else "active",
+                    ("finished" if game.is_solo or game.tournament_id else "choice") if finished else "guessing",
                     winner,
                     loser,
                     int(time.time()),

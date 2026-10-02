@@ -908,4 +908,52 @@ MIGRATIONS: tuple[str, ...] = (
     ) WHERE id IS NULL;
     DROP TABLE rps_migration_missing_ids;
     """,
+    """
+    CREATE TABLE tournaments (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        creator_id INTEGER NOT NULL REFERENCES users(telegram_id),
+        player2_id INTEGER REFERENCES users(telegram_id),
+        is_solo INTEGER NOT NULL CHECK (is_solo IN (0, 1)),
+        game_types_json TEXT NOT NULL,
+        current_stage INTEGER NOT NULL DEFAULT 1,
+        current_game_id INTEGER,
+        player1_score INTEGER NOT NULL DEFAULT 0,
+        player2_score INTEGER NOT NULL DEFAULT 0,
+        status TEXT NOT NULL CHECK (status IN ('waiting', 'active', 'finished', 'cancelled')),
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+    );
+    CREATE UNIQUE INDEX idx_tournaments_one_open_creator
+        ON tournaments(creator_id) WHERE status IN ('waiting', 'active');
+    CREATE INDEX idx_tournaments_player2_status
+        ON tournaments(player2_id, status);
+    ALTER TABLE games ADD COLUMN tournament_id INTEGER REFERENCES tournaments(id);
+    ALTER TABLE games ADD COLUMN tournament_stage INTEGER;
+    CREATE UNIQUE INDEX idx_games_tournament_stage
+        ON games(tournament_id, tournament_stage) WHERE tournament_id IS NOT NULL;
+
+    -- Preserve aggregate-only values written after the previous migration.
+    INSERT INTO score_events (user_id, reason, amount, created_at)
+        SELECT telegram_id, 'legacy', points_won, unixepoch() FROM user_stats
+        WHERE points_won > 0 AND NOT EXISTS (
+            SELECT 1 FROM score_events s WHERE s.user_id = user_stats.telegram_id
+        );
+    UPDATE user_stats SET points_won = (
+        SELECT COALESCE(SUM(amount), 0) FROM score_events s
+        WHERE s.user_id = user_stats.telegram_id
+    );
+    CREATE TEMP TABLE tournament_migration_missing_ids (
+        user_rowid INTEGER PRIMARY KEY, new_id INTEGER NOT NULL
+    );
+    INSERT INTO tournament_migration_missing_ids (user_rowid, new_id)
+        SELECT rowid,
+               (SELECT COALESCE(MAX(id), 0) FROM users)
+                   + ROW_NUMBER() OVER (ORDER BY rowid)
+        FROM users WHERE id IS NULL;
+    UPDATE users SET id = (
+        SELECT new_id FROM tournament_migration_missing_ids
+        WHERE user_rowid = users.rowid
+    ) WHERE id IS NULL;
+    DROP TABLE tournament_migration_missing_ids;
+    """,
 )

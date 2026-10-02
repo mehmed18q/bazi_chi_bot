@@ -36,6 +36,7 @@ from .models import (
     PaymentReceipt,
     PaymentSettings,
     Stats,
+    Tournament,
     TurnResult,
     User,
     WordGuessResult,
@@ -46,6 +47,7 @@ from .services.challenges import ChallengeService
 from .services.daily_challenges import DailyChallengeService
 from .services.matches import MatchService
 from .services.solo import BotAdvance, SoloOpponent
+from .services.tournaments import TournamentService
 from .services.payments import PaymentService
 from .services.users import UserService
 
@@ -70,6 +72,7 @@ class GameService:
         self.queries = GameRepository(database)
         self.solo = SoloOpponent(self.matches, self.queries)
         self.daily = DailyChallengeService(database, self.matches)
+        self.tournaments = TournamentService(database, self.matches)
         self.sponsors = SponsorRepository(database)
 
     async def active_sponsors(self) -> list[Sponsor]:
@@ -209,6 +212,32 @@ class GameService:
         game = await self.matches.create_solo_game(creator_id, fists, total_hands, game_type)
         return await self.advance_bot(game.id)
 
+    async def create_tournament(
+        self, creator_id: int, is_solo: bool, game_types: tuple[GameType, ...]
+    ) -> BotAdvance:
+        game = await self.tournaments.start(creator_id, is_solo, game_types)
+        return await self.advance_bot(game.id) if is_solo else BotAdvance(game, ())
+
+    async def tournament_for_game(self, game_id: int) -> Tournament | None:
+        return await self.tournaments.for_game(game_id)
+
+    async def current_tournament(self, user_id: int) -> tuple[Tournament, Game] | None:
+        await self._resume_tournament(user_id)
+        return await self.tournaments.current_for_user(user_id)
+
+    async def cancel_tournament(self, tournament_id: int, user_id: int) -> Game:
+        return await self.tournaments.cancel(tournament_id, user_id)
+
+    async def _resume_tournament(self, user_id: int) -> None:
+        for _ in range(3):
+            await self.tournaments.sync_user(user_id)
+            current = await self.tournaments.current_for_user(user_id)
+            if current is None or not current[1].is_solo:
+                return
+            advance = await self.advance_bot(current[1].id)
+            if advance.game.status.value != "finished":
+                return
+
     async def advance_bot(self, game_id: int) -> BotAdvance:
         for _ in range(3):
             try:
@@ -327,9 +356,11 @@ class GameService:
         return await self.queries.get_game_by_token(invite_token)
 
     async def active_games(self, user_id: int) -> list[Game]:
+        await self._resume_tournament(user_id)
         return await self.queries.active_games(user_id)
 
     async def latest_finished_game(self, user_id: int) -> Game | None:
+        await self._resume_tournament(user_id)
         return await self.queries.latest_finished_game(user_id)
 
     async def game_message(self, game_id: int, user_id: int) -> tuple[int, int] | None:

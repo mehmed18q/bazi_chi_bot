@@ -148,7 +148,27 @@ async def view_for(
 ) -> tuple[str, object]:
     names = await game_names(service, game)
     link = await invite_url(bot, game) if game.status.value == "waiting" else None
-    return render_game(game, viewer_id, names, link), game_keyboard(game, viewer_id, link)
+    text = render_game(game, viewer_id, names, link)
+    tournament = await service.tournament_for_game(game.id) if game.tournament_id else None
+    if tournament is not None:
+        first = escape(names.get(tournament.creator_id, "بازیکن اول"))
+        second = escape(names.get(tournament.player2_id, "منتظر هم‌بازی"))
+        banner = (
+            f"🏆 <b>تورنومنت #{tournament.id}</b> | "
+            f"بازی {game.tournament_stage} از {len(tournament.game_types)}\n"
+            f"برد بازی‌ها: {first} <b>{tournament.player1_score}</b> - "
+            f"{second} <b>{tournament.player2_score}</b>"
+        )
+        if tournament.status == "finished":
+            if tournament.player1_score == tournament.player2_score:
+                banner += "\n🤝 <b>تورنومنت مساوی شد.</b>"
+            else:
+                winner = first if tournament.player1_score > tournament.player2_score else second
+                banner += f"\n🥇 <b>برندهٔ تورنومنت: {winner}</b>"
+        elif tournament.status == "cancelled":
+            banner += "\n🛑 <b>تورنومنت لغو شد.</b>"
+        text = f"{banner}\n\n{text}"
+    return text, game_keyboard(game, viewer_id, link)
 
 
 async def safe_edit(callback: CallbackQuery, text: str, reply_markup: object = None) -> bool:
@@ -306,6 +326,16 @@ class GamePresenter:
     def __init__(self, service: GameService) -> None:
         self.service = service
 
+    async def _prepare_game(self, game: Game) -> tuple[Game, str | None]:
+        if game.tournament_id is None:
+            return game, None
+        current = await self.service.tournaments.sync_game(game.id)
+        if current.id == game.id:
+            return current, None
+        if current.is_solo:
+            current = (await self.service.advance_bot(current.id)).game
+        return current, "⏭ <b>بازی بعدی تورنومنت شروع شد!</b>"
+
     async def send_game_view(
         self,
         bot: Bot,
@@ -316,6 +346,10 @@ class GamePresenter:
         fresh: bool = False,
     ) -> bool:
         """Update a card, or bring a changed turn to the bottom of the chat."""
+        previous_game = game
+        game, transition = await self._prepare_game(game)
+        if transition:
+            prefix = f"{prefix}\n{transition}" if prefix else transition
         text, keyboard = await view_for(self.service, bot, game, user_id)
         if prefix:
             text = f"{prefix}\n\n{text}"
@@ -355,6 +389,10 @@ class GamePresenter:
             await self.service.save_game_message(game.id, user_id, user_id, message_id)
             if fresh and stored is not None and stored != (user_id, message_id):
                 await safe_delete(bot, stored[0], stored[1])
+            if previous_game.id != game.id:
+                old_card = await self.service.game_message(previous_game.id, user_id)
+                if old_card is not None:
+                    await safe_delete(bot, old_card[0], old_card[1])
             return True
         if fresh and stored is not None:
             # The new message was not delivered; leave the existing card usable.
@@ -370,6 +408,9 @@ class GamePresenter:
         *,
         fresh: bool = False,
     ) -> None:
+        game, transition = await self._prepare_game(game)
+        if transition:
+            prefix = f"{prefix}\n{transition}" if prefix else transition
         text, keyboard = await view_for(self.service, bot, game, callback.from_user.id)
         if prefix:
             text = f"{prefix}\n\n{text}"

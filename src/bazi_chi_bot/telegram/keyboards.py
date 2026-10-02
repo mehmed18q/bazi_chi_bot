@@ -16,6 +16,7 @@ def menu_keyboard(
 ) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(text="🎮 شروع بازی", callback_data="menu:new")
+    builder.button(text="🏆 تورنومنت", callback_data="menu:tournament")
     builder.button(text="🎯 چالش روزانه", callback_data="menu:daily_challenge")
     builder.button(text="📊 آمار من", callback_data="menu:stats")
     builder.button(text="👤 نام نمایشی", callback_data="menu:profile")

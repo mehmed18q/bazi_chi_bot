@@ -178,6 +178,8 @@ class Game:
     daily_challenge_date: str | None = None
     rps_creator_move: str | None = None
     rps_player2_move: str | None = None
+    tournament_id: int | None = None
+    tournament_stage: int | None = None
 
     def score_for(self, user_id: int) -> int:
         if user_id == self.creator_id:
@@ -283,3 +285,17 @@ class DailyChallenge:
     total_hands: int
     bot_starts: bool
     secrets: tuple[object, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class Tournament:
+    id: int
+    creator_id: int
+    player2_id: int | None
+    is_solo: bool
+    game_types: tuple[GameType, ...]
+    current_stage: int
+    current_game_id: int
+    player1_score: int
+    player2_score: int
+    status: str

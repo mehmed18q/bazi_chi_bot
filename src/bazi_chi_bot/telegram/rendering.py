@@ -110,6 +110,13 @@ def render_game(
             state = "🏁 <b>این بار ربات برنده شد.</b> امتیازی ثبت نشد."
         if game.game_type is GameType.TIC_TAC_TOE:
             state += f"\n\n{board_text(game.board)}"
+    elif game.tournament_id is not None and game.status is GameStatus.FINISHED:
+        if game.winner_id is None:
+            state = "🤝 <b>این بازی تورنومنت مساوی شد.</b>"
+        elif game.winner_id == viewer_id:
+            state = "🏆 <b>این بازی تورنومنت را بردی!</b>"
+        else:
+            state = "🏁 <b>این بازی تورنومنت را باختی.</b>"
     elif game.game_type is GameType.ROCK_PAPER_SCISSORS and game.status is GameStatus.FINISHED:
         state = "🤝 <b>بازی مساوی تمام شد.</b>" if game.winner_id is None else (
             "🏆 <b>برنده شدی!</b>" if game.winner_id == viewer_id
