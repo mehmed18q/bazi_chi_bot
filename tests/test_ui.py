@@ -25,6 +25,7 @@ from bazi_chi_bot.ui import (
     [
         (GameType.GOL_YA_POOCH, "گل یا پوچ", "setup:f:2"),
         (GameType.TIC_TAC_TOE, "دوز سه‌تایی", "setup:ttt:3"),
+        (GameType.ROCK_PAPER_SCISSORS, "سنگ، کاغذ، قیچی", "setup:rps:3"),
         (GameType.TRUTH_OR_DARE, "جرئت یا حقیقت", "setup:tod:3"),
         (GameType.WORD_GUESS, "حدس کلمه", "setup:word:3"),
         (GameType.MASTERMIND, "فکر بکر", "setup:mastermind:3"),

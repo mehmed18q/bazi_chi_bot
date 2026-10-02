@@ -85,6 +85,7 @@ def register_handlers(
         return {
             GameType.GOL_YA_POOCH: "گل یا پوچ 🌸",
             GameType.TIC_TAC_TOE: "دوز سه‌تایی ❌⭕",
+            GameType.ROCK_PAPER_SCISSORS: "سنگ، کاغذ، قیچی ✊✋✌️",
             GameType.WORD_GUESS: "حدس کلمه 🔤",
             GameType.MASTERMIND: "فکر بکر 🎨",
             GameType.TRUTH_OR_DARE: "جرئت یا حقیقت 🎭",

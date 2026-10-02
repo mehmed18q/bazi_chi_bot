@@ -195,6 +195,7 @@ def game_types_keyboard(solo: bool = False) -> InlineKeyboardMarkup:
     prefix = "setup:solo:type:" if solo else "setup:type:"
     builder.button(text="🌸 گل یا پوچ", callback_data=f"{prefix}gol")
     builder.button(text="❌⭕ دوز سه‌تایی", callback_data=f"{prefix}ttt")
+    builder.button(text="✊✋✌️ سنگ، کاغذ، قیچی", callback_data=f"{prefix}rps")
     builder.button(text="🔤 حدس کلمه", callback_data=f"{prefix}word")
     builder.button(text="🎨 فکر بکر", callback_data=f"{prefix}mastermind")
     if not solo:
@@ -203,7 +204,7 @@ def game_types_keyboard(solo: bool = False) -> InlineKeyboardMarkup:
     if not solo:
         builder.button(text="🤖 بازی تک‌نفره با ربات", callback_data="setup:solo")
     builder.button(text="🏠 منوی اصلی", callback_data="menu:home")
-    builder.adjust(2, 2, 1, 1, 1)
+    builder.adjust(2, 2, 2, 1, 1)
     return builder.as_markup()
 
 
@@ -241,24 +242,19 @@ def hands_keyboard(
 ) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     for hands in (3, 5, 7, 9):
-        callback = (
-            f"setup:solo:play:{game_type.value}:{fists}:{hands}" if solo else
-            f"setup:ttt:{hands}"
-            if game_type is GameType.TIC_TAC_TOE
-            else (
-                f"setup:tod:{hands}"
-                if game_type is GameType.TRUTH_OR_DARE
-                else (
-                    f"setup:mastermind:{hands}"
-                    if game_type is GameType.MASTERMIND
-                    else (
-                        f"setup:word:{hands}"
-                        if game_type is GameType.WORD_GUESS
-                        else f"setup:h:{fists}:{hands}"
-                    )
-                )
-            )
-        )
+        if solo:
+            callback = f"setup:solo:play:{game_type.value}:{fists}:{hands}"
+        elif game_type is GameType.GOL_YA_POOCH:
+            callback = f"setup:h:{fists}:{hands}"
+        else:
+            route = {
+                GameType.TIC_TAC_TOE: "ttt",
+                GameType.ROCK_PAPER_SCISSORS: "rps",
+                GameType.TRUTH_OR_DARE: "tod",
+                GameType.WORD_GUESS: "word",
+                GameType.MASTERMIND: "mastermind",
+            }[game_type]
+            callback = f"setup:{route}:{hands}"
         unit = (
             "دور"
             if game_type in {GameType.TRUTH_OR_DARE, GameType.WORD_GUESS, GameType.MASTERMIND}
@@ -276,23 +272,14 @@ def game_keyboard(
     builder = InlineKeyboardBuilder()
     if game.status is GameStatus.WAITING and user_id == game.creator_id:
         if invite_url:
-            invitation = (
-                "بیا با هم دوز سه‌تایی بازی کنیم! ❌⭕"
-                if game.game_type is GameType.TIC_TAC_TOE
-                else (
-                    "بیا با هم جرئت یا حقیقت بازی کنیم! 🎭"
-                    if game.game_type is GameType.TRUTH_OR_DARE
-                    else (
-                        "بیا با هم حدس کلمه بازی کنیم! 🔤"
-                        if game.game_type is GameType.WORD_GUESS
-                        else (
-                            "بیا با هم فکر بکر بازی کنیم! 🎨"
-                            if game.game_type is GameType.MASTERMIND
-                            else "بیا با هم گل یا پوچ بازی کنیم! 🌸"
-                        )
-                    )
-                )
-            )
+            invitation = {
+                GameType.GOL_YA_POOCH: "بیا با هم گل یا پوچ بازی کنیم! 🌸",
+                GameType.TIC_TAC_TOE: "بیا با هم دوز سه‌تایی بازی کنیم! ❌⭕",
+                GameType.ROCK_PAPER_SCISSORS: "بیا سنگ، کاغذ، قیچی بازی کنیم! ✊✋✌️",
+                GameType.TRUTH_OR_DARE: "بیا با هم جرئت یا حقیقت بازی کنیم! 🎭",
+                GameType.WORD_GUESS: "بیا با هم حدس کلمه بازی کنیم! 🔤",
+                GameType.MASTERMIND: "بیا با هم فکر بکر بازی کنیم! 🎨",
+            }[game.game_type]
             share_url = (
                 "https://t.me/share/url?url="
                 f"{quote(invite_url, safe='')}&text={quote(invitation, safe='')}"
@@ -313,6 +300,17 @@ def game_keyboard(
             builder.button(
                 text={"X": "❌", "O": "⭕", ".": "⬜"}[mark],
                 callback_data=f"game:{game.id}:{game.version}:move:{cell}",
+            )
+        builder.adjust(3)
+        return builder.as_markup()
+
+    if game.game_type is GameType.ROCK_PAPER_SCISSORS and game.status is GameStatus.ACTIVE:
+        if game.next_player_id != user_id:
+            return None
+        for choice, label in (("rock", "✊ سنگ"), ("paper", "✋ کاغذ"), ("scissors", "✌️ قیچی")):
+            builder.button(
+                text=label,
+                callback_data=f"game:{game.id}:{game.version}:rps:{choice}",
             )
         builder.adjust(3)
         return builder.as_markup()

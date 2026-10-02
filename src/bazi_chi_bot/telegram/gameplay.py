@@ -48,6 +48,14 @@ GAME_SETUP: dict[GameType, tuple[str, str, int]] = {
         "دست مساوی امتیاز ندارد و دوباره بازی می‌شود.",
         2,
     ),
+    GameType.ROCK_PAPER_SCISSORS: (
+        "سنگ، کاغذ، قیچی",
+        (
+            "✊✋✌️ <b>سنگ، کاغذ، قیچی</b>\n\nچند دست بازی کنیم؟ "
+            "انتخاب نفر اول تا حرکت نفر دوم پنهان می‌ماند. مساوی هم یک دست حساب می‌شود."
+        ),
+        2,
+    ),
     GameType.TRUTH_OR_DARE: (
         "جرئت یا حقیقت",
         "🎭 <b>جرئت یا حقیقت</b>\n\n"
@@ -122,14 +130,14 @@ def register_handlers(
 
     @router.callback_query(F.data == "setup:type:random")
     async def setup_random(callback: CallbackQuery) -> None:
-        await show_setup(callback, choice(tuple(GameType)), random=True)
+        await show_setup(callback, choice(tuple(GAME_SETUP)), random=True)
 
     @router.callback_query(F.data == "setup:solo")
     async def setup_solo(callback: CallbackQuery) -> None:
         await safe_edit(
             callback,
             "🤖 <b>بازی تک‌نفره با ربات</b>\n\n"
-            "یکی از چهار بازی را انتخاب کن. جرئت یا حقیقت در این حالت اجرا نمی‌شود. "
+            "یکی از پنج بازی را انتخاب کن. جرئت یا حقیقت در این حالت اجرا نمی‌شود. "
             "اگر ربات را شکست بدهی، یک امتیاز می‌گیری.",
             game_types_keyboard(solo=True),
         )
@@ -141,6 +149,7 @@ def register_handlers(
         types = {
             "gol": GameType.GOL_YA_POOCH,
             "ttt": GameType.TIC_TAC_TOE,
+            "rps": GameType.ROCK_PAPER_SCISSORS,
             "word": GameType.WORD_GUESS,
             "mastermind": GameType.MASTERMIND,
         }
@@ -186,6 +195,24 @@ def register_handlers(
     @router.callback_query(F.data == "setup:type:ttt")
     async def setup_tic_tac_toe(callback: CallbackQuery) -> None:
         await show_setup(callback, GameType.TIC_TAC_TOE)
+
+    @router.callback_query(F.data == "setup:type:rps")
+    async def setup_rps(callback: CallbackQuery) -> None:
+        await show_setup(callback, GameType.ROCK_PAPER_SCISSORS)
+
+    @router.callback_query(F.data.startswith("setup:rps:"))
+    async def create_rps(callback: CallbackQuery, bot: Bot) -> None:
+        try:
+            hands = int((callback.data or "").rsplit(":", 1)[1])
+            await service.save_user(telegram_user(callback.from_user))
+            game = await service.create_game(
+                callback.from_user.id, 2, hands, GameType.ROCK_PAPER_SCISSORS
+            )
+        except (ValueError, GameError):
+            await callback.answer("تنظیمات بازی درست نیست.", show_alert=True)
+            return
+        await edit_game_view(callback, bot, game, "✅ <b>بازی آماده شد!</b>")
+        await callback.answer("لینک دعوت آماده‌ست 📨")
 
     @router.callback_query(F.data == "setup:type:tod")
     async def setup_truth_or_dare(callback: CallbackQuery) -> None:
@@ -312,6 +339,36 @@ def register_handlers(
                 opponent_id = game.opponent_of(callback.from_user.id)
                 if opponent_id is not None and not game.is_solo:
                     await send_game_view(bot, result.game, opponent_id, prefix, fresh=True)
+            elif action == "rps":
+                result = await service.play_rps(
+                    game_id, callback.from_user.id, value, version
+                )
+                if result.round_finished:
+                    labels = {"rock": "✊ سنگ", "paper": "✋ کاغذ", "scissors": "✌️ قیچی"}
+                    names = await game_names(service, result.game)
+                    outcome = (
+                        "🤝 این دست مساوی شد؛ امتیازی ندارد."
+                        if result.point_winner_id is None
+                        else f"⭐ امتیاز این دست برای <b>{escape(names[result.point_winner_id])}</b>"
+                    )
+                    prefix = (
+                        f"🎲 حرکت‌ها: {escape(names[result.game.creator_id])}: "
+                        f"<b>{labels[result.creator_move]}</b> | "
+                        f"{escape(names[result.game.player2_id])}: "
+                        f"<b>{labels[result.player2_move]}</b>\n{outcome}"
+                    )
+                else:
+                    prefix = "✅ حرکتت ثبت شد؛ منتظر انتخاب هم‌بازی‌ات باش."
+                game, prefix = await after_human_turn(result.game, prefix)
+                await edit_game_view(callback, bot, game, prefix, fresh=True)
+                if not game.is_solo:
+                    opponent_id = game.opponent_of(callback.from_user.id)
+                    if opponent_id is not None:
+                        await send_game_view(
+                            bot, result.game, opponent_id,
+                            prefix if result.round_finished else "🎲 نوبت توست؛ حرکتت را انتخاب کن.",
+                            fresh=True,
+                        )
             elif action == "hide":
                 game = await service.hide_fist(game_id, callback.from_user.id, int(value), version)
                 game, prefix = await after_human_turn(game, "✅ انتخابت ثبت شد.")

@@ -30,6 +30,7 @@ from .models import (
     GameType,
     LeaderboardEntry,
     MoveResult,
+    RpsResult,
     MastermindGuessResult,
     MastermindSelection,
     PaymentReceipt,
@@ -236,6 +237,11 @@ class GameService:
         self, game_id: int, user_id: int, cell: int, expected_version: int
     ) -> MoveResult:
         return await self.matches.place_mark(game_id, user_id, cell, expected_version)
+
+    async def play_rps(
+        self, game_id: int, user_id: int, choice: str, expected_version: int
+    ) -> RpsResult:
+        return await self.matches.play_rps(game_id, user_id, choice, expected_version)
 
     async def choose_word(self, game_id: int, user_id: int, text: str) -> Game:
         return await self.matches.choose_word(game_id, user_id, text)

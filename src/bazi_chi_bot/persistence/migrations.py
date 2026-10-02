@@ -844,4 +844,68 @@ MIGRATIONS: tuple[str, ...] = (
     ) WHERE id IS NULL;
     DROP TABLE daily_migration_missing_ids;
     """,
+    """
+    -- Extend the game and daily challenge type checks without rebuilding live tables.
+    PRAGMA writable_schema = ON;
+    UPDATE sqlite_master SET sql = replace(
+        sql,
+        'game_type IN (''gol_ya_pooch'', ''tic_tac_toe'', ''truth_or_dare'', ''word_guess'', ''mastermind'')',
+        'game_type IN (''gol_ya_pooch'', ''tic_tac_toe'', ''truth_or_dare'', ''word_guess'', ''mastermind'', ''rock_paper_scissors'')'
+    ) WHERE type = 'table' AND name = 'games';
+    UPDATE sqlite_master SET sql = replace(
+        sql,
+        '''gol_ya_pooch'', ''tic_tac_toe'', ''word_guess'', ''mastermind''',
+        '''gol_ya_pooch'', ''tic_tac_toe'', ''word_guess'', ''mastermind'', ''rock_paper_scissors'''
+    ) WHERE type = 'table' AND name = 'daily_challenges';
+    PRAGMA schema_version = 2200;
+    PRAGMA writable_schema = OFF;
+
+    ALTER TABLE games ADD COLUMN rps_creator_move TEXT
+        CHECK (rps_creator_move IS NULL OR rps_creator_move IN ('rock', 'paper', 'scissors'));
+    ALTER TABLE games ADD COLUMN rps_player2_move TEXT
+        CHECK (rps_player2_move IS NULL OR rps_player2_move IN ('rock', 'paper', 'scissors'));
+
+    CREATE TABLE choice_observations (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        game_id INTEGER NOT NULL REFERENCES games(id) ON DELETE CASCADE,
+        hand_number INTEGER NOT NULL,
+        user_id INTEGER NOT NULL REFERENCES users(telegram_id),
+        game_type TEXT NOT NULL CHECK (game_type IN ('gol_ya_pooch', 'rock_paper_scissors')),
+        choice TEXT NOT NULL,
+        previous_choice TEXT,
+        option_count INTEGER NOT NULL,
+        hand_bucket INTEGER NOT NULL,
+        created_at INTEGER NOT NULL,
+        UNIQUE (game_id, hand_number, user_id)
+    );
+    CREATE INDEX idx_choice_observations_prediction
+        ON choice_observations(game_type, option_count, id DESC);
+    CREATE INDEX idx_choice_observations_user
+        ON choice_observations(user_id, game_type, option_count, id DESC);
+
+    -- Schema 25 installations may contain aggregate-only balances added after
+    -- the earlier backfill; keep those balances when upgrading to this schema.
+    INSERT INTO score_events (user_id, reason, amount, created_at)
+        SELECT telegram_id, 'legacy', points_won, unixepoch() FROM user_stats
+        WHERE points_won > 0 AND NOT EXISTS (
+            SELECT 1 FROM score_events s WHERE s.user_id = user_stats.telegram_id
+        );
+    UPDATE user_stats SET points_won = (
+        SELECT COALESCE(SUM(amount), 0) FROM score_events s
+        WHERE s.user_id = user_stats.telegram_id
+    );
+    CREATE TEMP TABLE rps_migration_missing_ids (
+        user_rowid INTEGER PRIMARY KEY, new_id INTEGER NOT NULL
+    );
+    INSERT INTO rps_migration_missing_ids (user_rowid, new_id)
+        SELECT rowid,
+               (SELECT COALESCE(MAX(id), 0) FROM users)
+                   + ROW_NUMBER() OVER (ORDER BY rowid)
+        FROM users WHERE id IS NULL;
+    UPDATE users SET id = (
+        SELECT new_id FROM rps_migration_missing_ids
+        WHERE user_rowid = users.rowid
+    ) WHERE id IS NULL;
+    DROP TABLE rps_migration_missing_ids;
+    """,
 )

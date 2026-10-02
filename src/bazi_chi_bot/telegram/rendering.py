@@ -75,6 +75,8 @@ def render_game(
     if game.game_type is GameType.TIC_TAC_TOE:
         unit = "دست" if game.is_solo else "دستِ امتیازدار"
         header = f"❌⭕ <b>دوز سه‌تایی #{game.id}</b>\n🧮 {game.total_hands} {unit}"
+    elif game.game_type is GameType.ROCK_PAPER_SCISSORS:
+        header = f"✊✋✌️ <b>سنگ، کاغذ، قیچی #{game.id}</b>\n🧮 {game.total_hands} دست"
     elif game.game_type is GameType.TRUTH_OR_DARE:
         header = f"🎭 <b>جرئت یا حقیقت #{game.id}</b>\n🧮 {game.total_hands} دور"
     elif game.game_type is GameType.WORD_GUESS:
@@ -108,6 +110,23 @@ def render_game(
             state = "🏁 <b>این بار ربات برنده شد.</b> امتیازی ثبت نشد."
         if game.game_type is GameType.TIC_TAC_TOE:
             state += f"\n\n{board_text(game.board)}"
+    elif game.game_type is GameType.ROCK_PAPER_SCISSORS and game.status is GameStatus.FINISHED:
+        state = "🤝 <b>بازی مساوی تمام شد.</b>" if game.winner_id is None else (
+            "🏆 <b>برنده شدی!</b>" if game.winner_id == viewer_id
+            else "🏁 <b>این بار باختی.</b>"
+        )
+    elif game.game_type is GameType.ROCK_PAPER_SCISSORS and game.status is GameStatus.ACTIVE:
+        my_move = (
+            game.rps_creator_move if viewer_id == game.creator_id else game.rps_player2_move
+        )
+        state = (
+            "🎲 <b>نوبت توست.</b> سنگ، کاغذ یا قیچی را انتخاب کن. "
+            "حرکت‌ها تا انتخاب هر دو نفر پنهان می‌مانند."
+            if game.next_player_id == viewer_id else
+            "✅ حرکتت ثبت شد؛ منتظر انتخاب هم‌بازی‌ات باش."
+            if my_move is not None else
+            f"⏳ منتظر انتخاب {opponent} باش."
+        )
     elif game.game_type is GameType.TIC_TAC_TOE and game.status is GameStatus.ACTIVE:
         symbol = "❌" if viewer_id == game.creator_id else "⭕"
         state = (

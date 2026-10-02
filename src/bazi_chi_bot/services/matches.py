@@ -30,6 +30,7 @@ from ..models import (
     MastermindGuessResult,
     MastermindSelection,
     MoveResult,
+    RpsResult,
     TurnResult,
     WordGuess,
     WordGuessResult,
@@ -51,6 +52,7 @@ from ..rules import (
     normalize_word,
     play_tic_tac_toe,
 )
+from .prediction import RPS_CHOICES, choose_rps_response, record_choice
 
 BOT_USER_ID = -1
 
@@ -78,11 +80,12 @@ class MatchService:
             game_type = GameType(game_type)
         except ValueError as error:
             raise InvalidGameSetup from error
-        valid_fists = (
-            fists in ALLOWED_FISTS or fists == MASTERMIND_MAX_ATTEMPTS
-            if game_type is GameType.MASTERMIND
-            else fists in ALLOWED_FISTS
-        )
+        if game_type is GameType.MASTERMIND:
+            valid_fists = fists in ALLOWED_FISTS or fists == MASTERMIND_MAX_ATTEMPTS
+        elif game_type is GameType.ROCK_PAPER_SCISSORS:
+            valid_fists = fists == 2
+        else:
+            valid_fists = fists in ALLOWED_FISTS
         if not valid_fists or total_hands not in ALLOWED_HAND_COUNTS:
             raise InvalidGameSetup
         now = int(time.time())
@@ -173,9 +176,9 @@ class MatchService:
                     guesser_id,
                     "choice"
                     if game.game_type is GameType.TRUTH_OR_DARE
-                    else ("guessing" if game.game_type is GameType.TIC_TAC_TOE else "hiding"),
-                    hider_id if game.game_type is GameType.TIC_TAC_TOE else None,
-                    hider_id if game.game_type is GameType.TIC_TAC_TOE else None,
+                    else ("guessing" if game.game_type in (GameType.TIC_TAC_TOE, GameType.ROCK_PAPER_SCISSORS) else "hiding"),
+                    hider_id if game.game_type in (GameType.TIC_TAC_TOE, GameType.ROCK_PAPER_SCISSORS) else None,
+                    hider_id if game.game_type in (GameType.TIC_TAC_TOE, GameType.ROCK_PAPER_SCISSORS) else None,
                     game.creator_id if game.game_type is GameType.TRUTH_OR_DARE else None,
                     player_id if game.game_type is GameType.TRUTH_OR_DARE else None,
                     now,
@@ -206,11 +209,12 @@ class MatchService:
             raise InvalidGameSetup from error
         if game_type is GameType.TRUTH_OR_DARE or creator_id == BOT_USER_ID:
             raise InvalidGameSetup
-        valid_fists = (
-            fists == MASTERMIND_MAX_ATTEMPTS
-            if game_type is GameType.MASTERMIND
-            else fists in ALLOWED_FISTS
-        )
+        if game_type is GameType.MASTERMIND:
+            valid_fists = fists == MASTERMIND_MAX_ATTEMPTS
+        elif game_type is GameType.ROCK_PAPER_SCISSORS:
+            valid_fists = fists == 2
+        else:
+            valid_fists = fists in ALLOWED_FISTS
         if not valid_fists or total_hands not in ALLOWED_HAND_COUNTS:
             raise InvalidGameSetup
         first = (
@@ -282,15 +286,24 @@ class MatchService:
                 (
                     secrets.token_urlsafe(8), creator_id, BOT_USER_ID, fists, total_hands,
                     first, first, BOT_USER_ID if first == creator_id else creator_id,
-                    "guessing" if game_type is GameType.TIC_TAC_TOE else "hiding",
-                    first if game_type is GameType.TIC_TAC_TOE else None,
-                    first if game_type is GameType.TIC_TAC_TOE else None,
+                    "guessing" if game_type in (GameType.TIC_TAC_TOE, GameType.ROCK_PAPER_SCISSORS) else "hiding",
+                    (creator_id if game_type is GameType.ROCK_PAPER_SCISSORS else first)
+                    if game_type in (GameType.TIC_TAC_TOE, GameType.ROCK_PAPER_SCISSORS) else None,
+                    first if game_type in (GameType.TIC_TAC_TOE, GameType.ROCK_PAPER_SCISSORS) else None,
                     game_type.value,
                     daily_date,
                     now, now,
                 ),
             )
-            return await _locked_game(connection, cursor.lastrowid)
+            game = await _locked_game(connection, cursor.lastrowid)
+            if game_type is GameType.ROCK_PAPER_SCISSORS:
+                bot_move = await choose_rps_response(connection, creator_id, 1, total_hands)
+                await connection.execute(
+                    "UPDATE games SET rps_player2_move = ? WHERE id = ?",
+                    (bot_move, game.id),
+                )
+                game = await _locked_game(connection, game.id)
+            return game
 
     async def cancel_waiting(self, game_id: int, user_id: int, expected_version: int) -> Game:
         async with self.database.transaction() as connection:
@@ -415,6 +428,12 @@ class MatchService:
                 await award_point(connection, game.id, point_winner_id, "round", game.hand_number)
             elif match_finished and winner_id == game.creator_id:
                 await award_point(connection, game.id, winner_id, "round", game.hand_number)
+            await record_choice(
+                connection, game_id=game.id, hand_number=game.hand_number,
+                total_hands=game.total_hands, user_id=game.hider_id,
+                game_type=GameType.GOL_YA_POOCH, choice=str(hidden_fist),
+                option_count=game.fists,
+            )
             updated = await _locked_game(connection, game.id)
         return TurnResult(
             game=updated,
@@ -424,6 +443,95 @@ class MatchService:
             point_winner_id=point_winner_id,
             match_finished=match_finished,
         )
+
+    async def play_rps(
+        self, game_id: int, user_id: int, choice: str, expected_version: int
+    ) -> RpsResult:
+        if choice not in RPS_CHOICES:
+            raise InvalidGameSetup
+        async with self.database.transaction() as connection:
+            game = await _locked_game(connection, game_id)
+            _require_player(game, user_id)
+            _require_version(game, expected_version)
+            if (
+                game.game_type is not GameType.ROCK_PAPER_SCISSORS
+                or game.status is not GameStatus.ACTIVE
+                or game.next_player_id != user_id
+            ):
+                raise NotYourTurn
+            creator_move = choice if user_id == game.creator_id else game.rps_creator_move
+            player2_move = choice if user_id == game.player2_id else game.rps_player2_move
+            now = int(time.time())
+            if creator_move is None or player2_move is None:
+                await connection.execute(
+                    """UPDATE games SET rps_creator_move = ?, rps_player2_move = ?,
+                       next_player_id = ?, version = version + 1, updated_at = ?
+                       WHERE id = ? AND version = ?""",
+                    (creator_move, player2_move, game.opponent_of(user_id), now,
+                     game.id, game.version),
+                )
+                return RpsResult(await _locked_game(connection, game.id))
+
+            beats = {"rock": "scissors", "paper": "rock", "scissors": "paper"}
+            point_winner_id = (
+                None if creator_move == player2_move else
+                game.creator_id if beats[creator_move] == player2_move else game.player2_id
+            )
+            score1 = game.player1_score + int(point_winner_id == game.creator_id)
+            score2 = game.player2_score + int(point_winner_id == game.player2_id)
+            finished = game.hand_number == game.total_hands
+            winner_id = (
+                game.creator_id if score1 > score2 else
+                game.player2_id if score2 > score1 else None
+            ) if finished else None
+            loser_id = game.opponent_of(winner_id) if winner_id is not None else None
+            for player_id, move in ((game.creator_id, creator_move), (game.player2_id, player2_move)):
+                await record_choice(
+                    connection, game_id=game.id, hand_number=game.hand_number,
+                    total_hands=game.total_hands, user_id=player_id,
+                    game_type=GameType.ROCK_PAPER_SCISSORS, choice=move,
+                    option_count=3,
+                )
+            next_bot_move = (
+                await choose_rps_response(
+                    connection, game.creator_id, game.hand_number + 1, game.total_hands
+                ) if game.is_solo and not finished else None
+            )
+            next_starter = game.opponent_of(game.round_starter_id)
+            await connection.execute(
+                """UPDATE games SET player1_score = ?, player2_score = ?,
+                   hand_number = ?, round_starter_id = ?, next_player_id = ?,
+                   rps_creator_move = ?, rps_player2_move = ?,
+                   winner_id = ?, loser_id = ?, status = ?, phase = ?,
+                   version = version + 1, updated_at = ?
+                   WHERE id = ? AND version = ?""",
+                (
+                    score1, score2, game.hand_number + int(not finished),
+                    next_starter if not finished else game.round_starter_id,
+                    (game.creator_id if game.is_solo else next_starter) if not finished else None,
+                    None if not finished else creator_move,
+                    next_bot_move if not finished else player2_move,
+                    winner_id, loser_id,
+                    ("finished" if game.is_solo or winner_id is None else "choice")
+                    if finished else "active",
+                    ("finished" if game.is_solo or winner_id is None else "choice")
+                    if finished else "guessing",
+                    now, game.id, game.version,
+                ),
+            )
+            if point_winner_id is not None and not game.is_solo:
+                await award_point(connection, game.id, point_winner_id, "round", game.hand_number)
+            elif finished and winner_id == game.creator_id and game.is_solo:
+                await award_point(connection, game.id, winner_id, "round", game.hand_number)
+            if finished:
+                if winner_id is None:
+                    await record_draw(connection, game.creator_id, game.player2_id)
+                else:
+                    await record_match_result(connection, winner_id, loser_id)
+            return RpsResult(
+                await _locked_game(connection, game.id), creator_move, player2_move,
+                point_winner_id, True,
+            )
 
     async def choose_word(self, game_id: int, user_id: int, text: str) -> Game:
         word = normalize_word(text)

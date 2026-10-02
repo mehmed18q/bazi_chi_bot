@@ -13,6 +13,7 @@ from ..models import Game, GamePhase, GameStatus, GameType, MastermindGuess, Wor
 from ..persistence.games import GameRepository
 from ..rules import MASTERMIND_COLORS, evaluate_mastermind_guess, evaluate_word_guess
 from .matches import BOT_USER_ID, MatchService
+from .prediction import predict_choice
 
 BOT_WORDS = (
     "آب",
@@ -199,14 +200,14 @@ class SoloOpponent:
                     )
                     messages.append("🤖 ربات گل را پنهان کرد؛ نوبت حدس توست.")
                 elif game.phase is GamePhase.GUESSING and game.guesser_id == BOT_USER_ID:
-                    guess = (
-                        _public_choice(
-                            list(range(1, game.fists + 1)),
-                            f"{game.daily_challenge_date}:{game.hand_number}:gol-guess",
-                        )
-                        if game.daily_challenge_date is not None
-                        else secrets.randbelow(game.fists) + 1
-                    )
+                    async with self.games.database.connect() as connection:
+                        guess = int(await predict_choice(
+                            connection, user_id=game.creator_id,
+                            game_type=GameType.GOL_YA_POOCH,
+                            options=tuple(str(i) for i in range(1, game.fists + 1)),
+                            hand_number=game.hand_number,
+                            total_hands=game.total_hands,
+                        ))
                     result = await self.matches.guess_fist(
                         game.id, BOT_USER_ID, guess, game.version
                     )

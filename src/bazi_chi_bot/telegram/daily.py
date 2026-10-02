@@ -57,10 +57,11 @@ def register_handlers(
                 "tic_tac_toe": "دوز سه‌تایی",
                 "word_guess": "حدس کلمه",
                 "mastermind": "فکر بکر",
+                "rock_paper_scissors": "سنگ، کاغذ، قیچی",
             }[challenge.game_type.value]
             unit = (
                 "دست"
-                if challenge.game_type in (GameType.GOL_YA_POOCH, GameType.TIC_TAC_TOE)
+                if challenge.game_type in (GameType.GOL_YA_POOCH, GameType.TIC_TAC_TOE, GameType.ROCK_PAPER_SCISSORS)
                 else "دور"
             )
             text = (

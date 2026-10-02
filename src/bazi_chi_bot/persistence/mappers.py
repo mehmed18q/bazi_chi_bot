@@ -81,6 +81,8 @@ def _game_from_row(row: aiosqlite.Row) -> Game:
         mastermind_draft=tuple(json.loads(row["mastermind_draft_json"])),
         is_solo=bool(row["is_solo"]),
         daily_challenge_date=row["daily_challenge_date"],
+        rps_creator_move=row["rps_creator_move"],
+        rps_player2_move=row["rps_player2_move"],
     )
 
 

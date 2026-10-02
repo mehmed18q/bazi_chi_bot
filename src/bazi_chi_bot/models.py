@@ -12,6 +12,7 @@ class GameType(StrEnum):
     TRUTH_OR_DARE = "truth_or_dare"
     WORD_GUESS = "word_guess"
     MASTERMIND = "mastermind"
+    ROCK_PAPER_SCISSORS = "rock_paper_scissors"
 
 
 class GameStatus(StrEnum):
@@ -175,6 +176,8 @@ class Game:
     mastermind_draft: tuple[str, ...] = ()
     is_solo: bool = False
     daily_challenge_date: str | None = None
+    rps_creator_move: str | None = None
+    rps_player2_move: str | None = None
 
     def score_for(self, user_id: int) -> int:
         if user_id == self.creator_id:
@@ -210,6 +213,15 @@ class MoveResult:
     board: str
     round_finished: bool
     point_winner_id: int | None
+
+
+@dataclass(frozen=True, slots=True)
+class RpsResult:
+    game: Game
+    creator_move: str | None = None
+    player2_move: str | None = None
+    point_winner_id: int | None = None
+    round_finished: bool = False
 
 
 @dataclass(frozen=True, slots=True)

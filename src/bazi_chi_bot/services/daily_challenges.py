@@ -21,6 +21,7 @@ DAILY_TYPES = (
     GameType.TIC_TAC_TOE,
     GameType.WORD_GUESS,
     GameType.MASTERMIND,
+    GameType.ROCK_PAPER_SCISSORS,
 )
 
 
@@ -227,10 +228,11 @@ class DailyChallengeService:
             GameType.TIC_TAC_TOE: "دوز سه‌تایی",
             GameType.WORD_GUESS: "حدس کلمه",
             GameType.MASTERMIND: "فکر بکر",
+            GameType.ROCK_PAPER_SCISSORS: "سنگ، کاغذ، قیچی",
         }
         title = titles[challenge.game_type]
         unit = (
-            "دست" if challenge.game_type in (GameType.GOL_YA_POOCH, GameType.TIC_TAC_TOE) else "دور"
+            "دست" if challenge.game_type in (GameType.GOL_YA_POOCH, GameType.TIC_TAC_TOE, GameType.ROCK_PAPER_SCISSORS) else "دور"
         )
         if event == "start":
             game = await self.participation(date.fromisoformat(day), user_id)
