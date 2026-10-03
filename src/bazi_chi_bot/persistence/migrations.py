@@ -1102,4 +1102,143 @@ MIGRATIONS: tuple[str, ...] = (
     ) WHERE id IS NULL;
     DROP TABLE word_migration_missing_ids;
     """,
+    """
+    CREATE TABLE referral_settings (
+        singleton_id INTEGER PRIMARY KEY CHECK (singleton_id = 1),
+        required_activations INTEGER NOT NULL DEFAULT 10
+            CHECK (required_activations BETWEEN 1 AND 1000),
+        updated_at INTEGER NOT NULL,
+        updated_by INTEGER
+    );
+    INSERT INTO referral_settings (singleton_id, required_activations, updated_at)
+        VALUES (1, 10, unixepoch());
+
+    CREATE TEMP TABLE referral_migration_missing_ids (
+        user_rowid INTEGER PRIMARY KEY, new_id INTEGER NOT NULL
+    );
+    INSERT INTO referral_migration_missing_ids (user_rowid, new_id)
+        SELECT rowid,
+               (SELECT COALESCE(MAX(id), 0) FROM users)
+                   + ROW_NUMBER() OVER (ORDER BY rowid)
+        FROM users WHERE id IS NULL;
+    UPDATE users SET id = (
+        SELECT new_id FROM referral_migration_missing_ids
+        WHERE user_rowid = users.rowid
+    ) WHERE id IS NULL;
+    DROP TABLE referral_migration_missing_ids;
+
+    CREATE TABLE referral_codes (
+        user_id INTEGER PRIMARY KEY REFERENCES users(telegram_id) ON DELETE CASCADE,
+        token TEXT NOT NULL UNIQUE,
+        created_at INTEGER NOT NULL
+    );
+    CREATE TABLE referrals (
+        invitee_id INTEGER PRIMARY KEY REFERENCES users(telegram_id) ON DELETE CASCADE,
+        inviter_id INTEGER NOT NULL REFERENCES users(telegram_id) ON DELETE CASCADE,
+        source TEXT NOT NULL CHECK (source IN ('link', 'game', 'group')),
+        joined_at INTEGER NOT NULL,
+        activated_at INTEGER,
+        joined_notified_at INTEGER,
+        activated_notified_at INTEGER,
+        CHECK (invitee_id != inviter_id)
+    );
+    CREATE INDEX idx_referrals_inviter ON referrals(inviter_id, activated_at);
+    CREATE TABLE group_referral_owners (
+        chat_id INTEGER PRIMARY KEY,
+        inviter_id INTEGER NOT NULL REFERENCES users(telegram_id) ON DELETE CASCADE,
+        added_at INTEGER NOT NULL
+    );
+    ALTER TABLE users ADD COLUMN referral_unlocked_at INTEGER;
+    ALTER TABLE users ADD COLUMN referral_unlock_notified_at INTEGER;
+    ALTER TABLE users ADD COLUMN premium_revoked_by_admin INTEGER NOT NULL DEFAULT 0
+        CHECK (premium_revoked_by_admin IN (0, 1));
+
+    -- Preserve aggregate-only balances written after the previous release.
+    INSERT INTO score_events (user_id, reason, amount, created_at)
+        SELECT telegram_id, 'legacy', points_won, unixepoch() FROM user_stats
+        WHERE points_won > 0 AND NOT EXISTS (
+            SELECT 1 FROM score_events s WHERE s.user_id = user_stats.telegram_id
+        );
+
+    DROP TRIGGER IF EXISTS score_event_updates_total;
+    DROP TRIGGER IF EXISTS score_event_valid_player;
+    DROP TRIGGER IF EXISTS score_event_no_update;
+    DROP TRIGGER IF EXISTS score_event_no_delete;
+    DROP INDEX IF EXISTS idx_score_legacy;
+    DROP INDEX IF EXISTS idx_score_round;
+    DROP INDEX IF EXISTS idx_score_challenge;
+    DROP INDEX IF EXISTS idx_score_login;
+    DROP INDEX IF EXISTS idx_score_user;
+    DROP INDEX IF EXISTS idx_score_created_at;
+
+    ALTER TABLE score_events RENAME TO score_events_old;
+    CREATE TABLE score_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL REFERENCES users(telegram_id),
+        game_id INTEGER REFERENCES games(id),
+        reason TEXT NOT NULL CHECK (reason IN (
+            'legacy', 'round', 'challenge', 'login', 'referral_join', 'referral_activate')),
+        hand_number INTEGER,
+        period_start INTEGER,
+        referral_invitee_id INTEGER REFERENCES users(telegram_id),
+        amount INTEGER NOT NULL CHECK (amount > 0),
+        created_at INTEGER NOT NULL,
+        CHECK (
+            (reason = 'legacy' AND game_id IS NULL AND hand_number IS NULL
+                AND referral_invitee_id IS NULL)
+            OR (reason = 'login' AND game_id IS NULL AND hand_number IS NULL
+                AND period_start IS NOT NULL AND referral_invitee_id IS NULL AND amount = 1)
+            OR (reason IN ('round', 'challenge') AND game_id IS NOT NULL
+                AND hand_number IS NOT NULL AND hand_number >= 1
+                AND period_start IS NULL AND referral_invitee_id IS NULL AND amount = 1)
+            OR (reason IN ('referral_join', 'referral_activate')
+                AND game_id IS NULL AND hand_number IS NULL AND period_start IS NULL
+                AND referral_invitee_id IS NOT NULL AND amount = 1)
+        )
+    );
+    INSERT INTO score_events
+        (id, user_id, game_id, reason, hand_number, period_start, amount, created_at)
+        SELECT id, user_id, game_id, reason, hand_number, period_start, amount, created_at
+        FROM score_events_old;
+    DROP TABLE score_events_old;
+
+    CREATE UNIQUE INDEX idx_score_legacy ON score_events(user_id) WHERE reason = 'legacy';
+    CREATE UNIQUE INDEX idx_score_round ON score_events(game_id, hand_number)
+        WHERE reason = 'round';
+    CREATE UNIQUE INDEX idx_score_challenge ON score_events(game_id, hand_number)
+        WHERE reason = 'challenge';
+    CREATE UNIQUE INDEX idx_score_login ON score_events(user_id, period_start)
+        WHERE reason = 'login';
+    CREATE UNIQUE INDEX idx_score_referral_join ON score_events(referral_invitee_id)
+        WHERE reason = 'referral_join';
+    CREATE UNIQUE INDEX idx_score_referral_activate ON score_events(referral_invitee_id)
+        WHERE reason = 'referral_activate';
+    CREATE INDEX idx_score_user ON score_events(user_id, id);
+    CREATE INDEX idx_score_created_at ON score_events(created_at);
+
+    CREATE TRIGGER score_event_updates_total AFTER INSERT ON score_events
+    BEGIN
+        UPDATE user_stats SET points_won = points_won + NEW.amount WHERE telegram_id = NEW.user_id;
+    END;
+    CREATE TRIGGER score_event_valid_player BEFORE INSERT ON score_events
+    WHEN NEW.game_id IS NOT NULL
+    BEGIN
+        SELECT CASE WHEN NOT EXISTS (
+            SELECT 1 FROM games g WHERE g.id = NEW.game_id
+                AND NEW.user_id IN (g.creator_id, g.player2_id)
+        ) THEN RAISE(ABORT, 'Score recipient is not a player') END;
+    END;
+    CREATE TRIGGER score_event_no_update BEFORE UPDATE ON score_events
+    BEGIN
+        SELECT RAISE(ABORT, 'Score events are immutable');
+    END;
+    CREATE TRIGGER score_event_no_delete BEFORE DELETE ON score_events
+    BEGIN
+        SELECT RAISE(ABORT, 'Score events are immutable');
+    END;
+    UPDATE user_stats SET points_won = (
+        SELECT COALESCE(SUM(amount), 0) FROM score_events s
+        WHERE s.user_id = user_stats.telegram_id
+    );
+    """,
 )

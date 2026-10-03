@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import sqlite3
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from .config import Settings
@@ -39,6 +39,18 @@ async def reset_history(database: Database) -> dict[str, int]:
                correct_guesses = 0, wrong_guesses = 0, points_won = 0"""
         )
         await connection.execute("UPDATE users SET pending_invite_token = NULL")
+        # A history reset removes score events, so do not announce cleared points later.
+        await connection.execute(
+            """UPDATE referrals SET joined_notified_at = COALESCE(joined_notified_at, unixepoch()),
+               activated_notified_at = CASE WHEN activated_at IS NOT NULL
+                   THEN COALESCE(activated_notified_at, unixepoch())
+                   ELSE activated_notified_at END"""
+        )
+        await connection.execute(
+            """UPDATE users SET referral_unlock_notified_at = unixepoch()
+               WHERE referral_unlocked_at IS NOT NULL
+                 AND referral_unlock_notified_at IS NULL"""
+        )
         await connection.execute(
             """CREATE TRIGGER score_event_no_delete BEFORE DELETE ON score_events
                BEGIN SELECT RAISE(ABORT, 'Score events are immutable'); END"""
@@ -63,7 +75,7 @@ async def reset_history(database: Database) -> dict[str, int]:
 
 
 def backup(path: Path) -> Path:
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
     target_path = path.with_name(f"{path.name}.before-reset-{stamp}.bak")
     source = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)
     target = sqlite3.connect(target_path)

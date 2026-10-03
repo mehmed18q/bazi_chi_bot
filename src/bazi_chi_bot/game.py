@@ -50,6 +50,7 @@ from .services.matches import MatchService
 from .services.solo import BotAdvance, SoloOpponent
 from .services.tournaments import TournamentService
 from .services.payments import PaymentService
+from .services.referrals import ReferralService
 from .services.users import UserService
 
 
@@ -68,7 +69,8 @@ class GameService:
         self.matches = MatchService(
             database, choose_first_hider, activation_exempt_ids=activation_exempt_ids
         )
-        self.payments = PaymentService(database)
+        self.referrals = ReferralService(database)
+        self.payments = PaymentService(database, self.referrals)
         self.challenges = ChallengeService(database)
         self.queries = GameRepository(database)
         self.solo = SoloOpponent(self.matches, self.queries)

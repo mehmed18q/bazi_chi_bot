@@ -36,6 +36,7 @@ from .keyboards import (
     sponsor_kind_keyboard,
 )
 from .payments import activation_gate_text, show_activation_gate
+from .referrals import deliver_referral_notices, referral_status_text
 from .shared import (
     AdminMessageSetup,
     GamePresenter,
@@ -389,6 +390,35 @@ def register_handlers(
         await service.register_user_entry(user, activation_exempt=admin)
         await refresh_profile_photo(service, bot, user.telegram_id)
         payload = command.args or ""
+        if payload.startswith("ref_"):
+            await service.referrals.claim_code(user.telegram_id, payload.removeprefix("ref_"))
+            payload = ""
+        elif payload.startswith("join_"):
+            try:
+                invited_game = await service.get_game_by_token(payload.removeprefix("join_"))
+            except GameError:
+                pass
+            else:
+                await service.referrals.claim(user.telegram_id, invited_game.creator_id, "game")
+        elif payload.startswith("group_"):
+            try:
+                invited_session = await service.group_games.get(int(payload.removeprefix("group_")))
+            except (ValueError, GroupSessionError):
+                pass
+            else:
+                await service.referrals.claim(user.telegram_id, invited_session.creator_id, "group")
+        elif payload.startswith("grpchat_"):
+            try:
+                owner_id = await service.referrals.group_owner(int(payload.removeprefix("grpchat_")))
+            except ValueError:
+                owner_id = None
+            if owner_id is not None:
+                await service.referrals.claim(user.telegram_id, owner_id, "group")
+            payload = ""
+        await deliver_referral_notices(message, service)
+        referral_status = await referral_status_text(
+            service, user.telegram_id, await has_premium(user.telegram_id)
+        )
         persisted_user = await service.get_user(user.telegram_id)
         invite_token = payload.removeprefix("join_") if payload.startswith("join_") else ""
         if invite_token and persisted_user is not None:
@@ -397,7 +427,10 @@ def register_handlers(
         if not payload and persisted_user is not None and persisted_user.pending_invite_token:
             payload = f"join_{persisted_user.pending_invite_token}"
         if payload.startswith(("join_", "group_")) and not await has_premium(user.telegram_id):
-            await message.answer(START_TEXT, reply_markup=main_menu(user.telegram_id))
+            await message.answer(
+                START_TEXT + "\n\n" + referral_status,
+                reply_markup=main_menu(user.telegram_id),
+            )
             await message.answer(
                 await activation_gate_text(service, persisted_user),
                 reply_markup=activation_keyboard(),
@@ -462,7 +495,7 @@ def register_handlers(
             else ""
         )
         await message.answer(
-            START_TEXT + recovery,
+            START_TEXT + recovery + "\n\n" + referral_status,
             reply_markup=main_menu(user.telegram_id, bool(games)),
         )
 

@@ -8,6 +8,7 @@ from ..game import GameError, GameService
 
 FREE_CALLBACKS = frozenset({
     "menu:home", "menu:new", "menu:help", "menu:support", "menu:premium",
+    "menu:invite",
     "menu:profile", "menu:resume", "menu:last", "menu:daily_challenge", "noop",
 })
 FREE_COMMANDS = frozenset({"start", "help", "games", "lastgame"})

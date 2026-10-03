@@ -7,10 +7,10 @@ import re
 from html import escape
 
 from aiogram import Bot, F, Router
-from aiogram.enums import ChatType
+from aiogram.enums import ChatMemberStatus, ChatType
 from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
 from aiogram.filters import Command, CommandObject
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery, ChatMemberUpdated, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from ..game import GameService
@@ -105,6 +105,11 @@ def session_card(
         builder.button(text="🙋 حاضرم!", callback_data=f"grp:join:{session.id}")
         builder.button(text="▶️ شروع بازی", callback_data=f"grp:start:{session.id}")
         builder.button(text="🛑 لغو", callback_data=f"grp:cancel:{session.id}")
+        if bot_username:
+            builder.button(
+                text="📩 ورود به ربات و ثبت دعوت",
+                url=f"https://t.me/{bot_username}?start=group_{session.id}",
+            )
     elif session.status == "active":
         move = f"grp:move:{session.id}:{session.current_round}:"
         if session.game_type is GameType.ROCK_PAPER_SCISSORS:
@@ -237,6 +242,47 @@ def build_group_router(
     router = Router(name="group_games")
     router.message.filter(F.chat.type.in_(GROUP_CHAT_TYPES))
     router.callback_query.filter(F.message.chat.type.in_(GROUP_CHAT_TYPES))
+
+    @router.my_chat_member()
+    async def bot_added_to_group(event: ChatMemberUpdated, bot: Bot) -> None:
+        if event.chat.type not in GROUP_CHAT_TYPES:
+            return
+        before = event.old_chat_member.status
+        after = event.new_chat_member.status
+        present = {ChatMemberStatus.MEMBER, ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR}
+        if before in present and after not in present:
+            await service.referrals.remove_group_owner(event.chat.id)
+            return
+        if before in present or after not in present:
+            return
+        actor = event.from_user
+        account = await service.get_user(actor.id) if actor and not actor.is_bot else None
+        if actor is None or (actor.id not in admin_ids and (account is None or not account.is_activated)):
+            try:
+                await bot.send_message(
+                    event.chat.id,
+                    "⭐ برای افزودن بازی‌چی به گروه، دعوت‌کننده باید اشتراک ویژه داشته باشد.",
+                )
+            except TelegramAPIError:
+                pass
+            await bot.leave_chat(event.chat.id)
+            return
+        await service.referrals.set_group_owner(event.chat.id, actor.id)
+        bot_user = await bot.get_me()
+        builder = InlineKeyboardBuilder()
+        builder.button(
+            text="👥 ورود به بازی‌چی",
+            url=f"https://t.me/{bot_user.username}?start=grpchat_{event.chat.id}",
+        )
+        try:
+            await bot.send_message(
+                event.chat.id,
+                "👋 بازی‌چی به گروه اضافه شد! اعضایی که از دکمهٔ زیر وارد ربات شوند "
+                "به‌عنوان دعوت‌شدهٔ افزودن‌کنندهٔ ربات ثبت می‌شوند.",
+                reply_markup=builder.as_markup(),
+            )
+        except TelegramAPIError as error:
+            logger.warning("Could not announce group referral link in %s: %s", event.chat.id, error)
 
     async def allowed(callback: CallbackQuery, bot: Bot) -> bool:
         account = await service.get_user(callback.from_user.id)
@@ -393,9 +439,13 @@ def build_group_router(
         except ValueError:
             await callback.answer(ERROR_TEXT["missing"], show_alert=True)
             return
-        if await bound(callback, session_id) is None or not await allowed(callback, bot):
+        session = await bound(callback, session_id)
+        if session is None:
             return
         await service.save_user(telegram_user(callback.from_user))
+        await service.referrals.claim(callback.from_user.id, session.creator_id, "group")
+        if not await allowed(callback, bot):
+            return
         try:
             session = await service.group_games.join(
                 session_id, callback.from_user.id, callback.from_user.full_name

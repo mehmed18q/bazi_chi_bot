@@ -181,7 +181,10 @@ async def test_history_reset_preserves_human_words_and_clears_bot_exposure(
 
 async def test_upgrade_collects_words_still_present_in_older_games(tmp_path):
     database = Database(tmp_path / "previous-schema.sqlite3")
-    previous_version = len(MIGRATIONS) - 1
+    previous_version = next(
+        index for index, migration in enumerate(MIGRATIONS)
+        if "CREATE TABLE human_word_submissions" in migration
+    )
     async with database.connect() as connection:
         await connection.executescript(
             "\n".join(MIGRATIONS[:previous_version])

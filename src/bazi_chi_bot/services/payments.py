@@ -7,11 +7,13 @@ import time
 from ..db import Database
 from ..models import PaymentReceipt, PaymentReceiptStatus, PaymentSettings, User
 from ..persistence.mappers import _user_from_row
+from .referrals import ReferralService
 
 
 class PaymentService:
-    def __init__(self, database: Database) -> None:
+    def __init__(self, database: Database, referrals: ReferralService) -> None:
         self.database = database
+        self.referrals = referrals
 
     async def settings(self) -> PaymentSettings:
         async with self.database.connect() as connection:
@@ -82,13 +84,17 @@ class PaymentService:
                 SET is_activated = ?,
                     activation_approved_at = CASE WHEN ? = 1 THEN ? ELSE NULL END,
                     activation_approved_by = CASE WHEN ? = 1 THEN ? ELSE NULL END,
+                    premium_revoked_by_admin = ?,
                     updated_at = ?
                 WHERE telegram_id = ?
                 """,
-                (int(active), int(active), now, int(active), admin_id, now, user_id),
+                (int(active), int(active), now, int(active), admin_id,
+                 int(not active), now, user_id),
             )
             if cursor.rowcount != 1:
                 return None
+            if active:
+                await self.referrals.on_activation(connection, user_id, now)
             row = await (
                 await connection.execute("SELECT * FROM users WHERE telegram_id = ?", (user_id,))
             ).fetchone()
@@ -204,10 +210,14 @@ class PaymentService:
                 await connection.execute(
                     """
                     UPDATE users
-                    SET is_activated = 1, activation_approved_at = ?, activation_approved_by = ?
+                    SET is_activated = 1, activation_approved_at = ?, activation_approved_by = ?,
+                        premium_revoked_by_admin = 0
                     WHERE telegram_id = ?
                     """,
                     (now, admin_id, current["user_telegram_id"]),
+                )
+                await self.referrals.on_activation(
+                    connection, current["user_telegram_id"], now
                 )
                 await connection.execute(
                     """
