@@ -12,7 +12,7 @@ htmlcov/
 dist/
 build/
 *.egg-info/
-data/
+*.sqlite3*
 .idea/
 invitation/*
 !invitation/send_opt_in_invitations.py

@@ -17,6 +17,7 @@ was_active=0
 unit_changed=0
 redeploy_current=0
 dependency_install_started=0
+deployment_succeeded=0
 
 log() { printf '%s\n' "$*"; }
 die() { printf 'Error: %s\n' "$*" >&2; exit 1; }
@@ -41,11 +42,11 @@ on_exit() {
     local exit_code="$1"
     local current_commit=""
     trap - EXIT
+    set +e
     if (( exit_code == 0 )); then
         return
     fi
-    set +e
-    if (( service_touched == 1 )); then
+    if (( service_touched == 1 && deployment_succeeded == 0 )); then
         current_commit="$(git rev-parse HEAD 2>/dev/null)"
         if (( redeploy_current == 0 && dependency_install_started == 0 )) &&
            [[ -n "$previous_commit" && "$current_commit" == "$previous_commit" &&
@@ -106,6 +107,22 @@ fi
     die "The virtual environment requires Python 3.14 or newer."
 as_root test -f .env || die "The .env file is missing."
 as_root test -f "$unit_path" || die "The systemd unit file was not found: $unit_path"
+as_root env BOT_REPO_DIR="$repo_dir" .venv/bin/python - <<'PY'
+import os
+from pathlib import Path
+
+from bazi_chi_bot.config import Settings
+
+database_path = Settings().database_path.resolve()
+repo_path = Path(os.environ["BOT_REPO_DIR"]).resolve()
+if database_path.is_relative_to(repo_path):
+    raise SystemExit(
+        "Live database is inside the Git checkout. Move it outside the checkout "
+        "and set DATABASE_PATH before deploying. See DEPLOYMENT.md."
+    )
+if not database_path.is_file():
+    raise SystemExit(f"Live database not found: {database_path}")
+PY
 if as_root systemctl is-active --quiet "$service_name"; then
     was_active=1
 else
@@ -122,6 +139,9 @@ git cat-file -e "$target_commit:pyproject.toml" ||
     die "The target revision does not contain pyproject.toml."
 git cat-file -e "$target_commit:bazi_chi_bot.service" ||
     die "The target revision does not contain the systemd unit file."
+if git cat-file -e "$target_commit:data/bazi_chi_bot.sqlite3" 2>/dev/null; then
+    die "The target revision tracks the live database; refusing to deploy it."
+fi
 if [[ "$previous_commit" == "$target_commit" ]]; then
     redeploy_current=1
     log "master is already up to date; redeploying the current revision."
@@ -226,6 +246,12 @@ sleep 3
 as_root systemctl is-active --quiet "$service_name" || die "The service did not remain active after starting."
 as_root journalctl -u "$service_name" -n 30 --no-pager ||
     log "Warning: Could not read the logs; check the service status separately."
+deployment_succeeded=1
+
+log "Publishing a fresh SQLite snapshot to origin/server-data..."
+if ! bash scripts/publish_server_data.sh; then
+    die "Bot deployment succeeded, but the data push failed. The service remains running; retry with bash scripts/publish_server_data.sh."
+fi
 if (( redeploy_current == 1 )); then
     log "Redeployment completed: $target_commit"
 else

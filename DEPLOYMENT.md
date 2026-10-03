@@ -11,6 +11,73 @@
 از این بازه انجام دهید و مطمئن شوید ساعت سرور همگام است. فقط یک نمونه از ربات با
 همین توکن در حال polling باشد.
 
+## جابه‌جایی اولیهٔ دیتابیس از شاخهٔ کد
+
+در نسخه‌های قدیمی `data/bazi_chi_bot.sqlite3` در Git ثبت شده بود. قبل از دریافت
+commitی که آن را از Git خارج می‌کند، دیتابیس زندهٔ سرور را به مسیر بیرون از checkout
+منتقل کنید. این کار فقط یک‌بار لازم است. اگر `DATABASE_PATH` همین حالا به یک مسیر
+بیرون از `/opt/bazi_chi_bot` اشاره می‌کند، کپی را انجام ندهید و فقط مسیر و سلامت
+آن را بررسی کنید.
+
+ابتدا ربات را متوقف و با API خود SQLite یک کپی سالم بسازید:
+
+```bash
+cd /opt/bazi_chi_bot
+sudo systemctl stop bazi_chi_bot.service
+sudo install -d -m 0700 /var/lib/bazi_chi_bot
+sudo env BOT_NEW_DB=/var/lib/bazi_chi_bot/bazi_chi_bot.sqlite3 .venv/bin/python - <<'PY'
+import os
+import sqlite3
+from contextlib import closing
+from pathlib import Path
+
+from bazi_chi_bot.config import Settings
+
+source = Settings().database_path.resolve()
+target = Path(os.environ["BOT_NEW_DB"])
+if not source.is_file() or target.exists() or source == target:
+    raise SystemExit(f"Source missing or target already exists: {source} -> {target}")
+with (
+    closing(sqlite3.connect(source.as_uri() + "?mode=ro", uri=True)) as live,
+    closing(sqlite3.connect(target)) as copy,
+):
+    live.backup(copy)
+    if copy.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
+        raise SystemExit("Database copy failed integrity_check")
+target.chmod(0o600)
+print(f"Database copied to {target}")
+PY
+```
+
+در `.env` سرور با `sudoedit .env` مقدار زیر را تنظیم کنید:
+
+```env
+DATABASE_PATH=/var/lib/bazi_chi_bot/bazi_chi_bot.sqlite3
+```
+
+مسیر تنظیم‌شده را بررسی کنید و سپس سرویس را شروع و سلامت آن را تأیید کنید:
+
+```bash
+sudo .venv/bin/python -c 'from bazi_chi_bot.config import Settings; print(Settings().database_path.resolve())'
+sudo systemctl start bazi_chi_bot.service
+sudo systemctl status bazi_chi_bot.service --no-pager
+```
+
+**تا وقتی مطمئن نشده‌اید ربات از مسیر جدید استفاده می‌کند، فایل قدیمی را در Git
+بازنشانی نکنید.** پس از تأیید، فایل داخل checkout فقط کپی قدیمی است؛
+`git restore --worktree -- data/bazi_chi_bot.sqlite3` آن را با نسخهٔ ثبت‌شدهٔ قدیمی
+یکسان می‌کند تا checkout برای `scripts/deploy.sh` تمیز شود. اسکریپت استقرار از
+این پس پیش از دریافت کد، مسیر بیرونی دیتابیس را بررسی می‌کند و اگر نسخهٔ مقصد
+هنوز دیتابیس را در شاخهٔ کد نگه دارد، متوقف می‌شود.
+
+از این پس دیپلوی پس از بالا آمدن موفق سرویس، snapshot سرور را خودکار به شاخهٔ
+`server-data` می‌فرستد. برای دریافت آن روی لوکال یا انتشار دستی، فرمان‌های بخش
+«انتقال یک‌طرفهٔ دیتابیس» README را به کار ببرید. `master` و `server-data` دو شاخهٔ
+مجزا هستند؛ هرگز شاخهٔ داده را در شاخهٔ کد merge نکنید. **در اولین دیپلوی این
+نسخه، اسکریپت قدیمی که پیش از `git merge` شروع شده هنوز انتشار خودکار را ندارد؛**
+پس از اتمام همان دیپلوی، یک‌بار `bash scripts/publish_server_data.sh` را اجرا کنید.
+از دیپلوی بعدی انتشار خودکار انجام می‌شود.
+
 ## اجرای خودکار
 
 برای استقرار نمونهٔ بالا، از کاربری که به مخزن و `.venv` دسترسی نوشتن و مجوز
@@ -23,7 +90,10 @@ bash scripts/deploy.sh
 
 اسکریپت فقط روی شاخهٔ تمیز `master` اجرا می‌شود؛ نسخه را از `origin/master` با
 fast-forward می‌گیرد، سرویس را متوقف می‌کند، از `.env`، واحد systemd و SQLite
-پشتیبان می‌گیرد، وابستگی‌ها و تست‌ها را اجرا می‌کند و سرویس را دوباره بالا می‌آورد.
+پشتیبان می‌گیرد، وابستگی‌ها و تست‌ها را اجرا می‌کند، سرویس را دوباره بالا می‌آورد و
+پس از تأیید فعال‌بودن آن، snapshot تازهٔ دیتابیس را به Git می‌فرستد. اگر ساخت یا
+ارسال snapshot خطا بدهد، فرمان دیپلوی با خطا تمام می‌شود اما **سرویس روشن می‌ماند**؛
+پس از رفع مشکل، `bash scripts/publish_server_data.sh` را جداگانه اجرا کنید.
 اگر `master` از قبل به‌روز باشد (مثلاً `git pull` را دستی زده باشید)، همین مراحل
 برای نسخهٔ فعلی نیز اجرا می‌شوند و دیگر بدون بک‌آپ و restart خارج نمی‌شود. برای
 محیط مجازی فاقد `pip` نیز، اگر `uv` نصب باشد از آن برای نصب وابستگی‌ها استفاده
@@ -121,9 +191,10 @@ printf '%s\n' "$bot_db_backup" | sudo tee "$bot_backup_dir/database-backup-path.
 sudo chmod 0600 "$bot_backup_dir/database-backup-path.txt"
 ```
 
-اگر ابزار دعوت از اکسل را هم روی همین سرور استفاده می‌کنید، از داده‌های مستقل آن
-در `data/outreach/` نیز طبق سیاست پشتیبان‌گیری خود نسخه بگیرید. `.env` و پشتیبان‌ها
-حاوی دادهٔ حساس‌اند؛ آن‌ها را در Git یا مسیر عمومی قرار ندهید.
+اگر ابزار دعوت از اکسل را هم روی همین سرور استفاده می‌کنید، از دیتابیس مستقل آن
+در `invitation/phones.sqlite3` نیز جداگانه پشتیبان بگیرید؛ فرمان `server_data.py`
+فقط دیتابیس ربات را منتشر می‌کند. `.env` و پشتیبان‌های استقرار حاوی دادهٔ حساس‌اند؛
+آن‌ها را در Git یا مسیر عمومی قرار ندهید.
 
 ## ۳. دریافت نسخه، نصب و آزمون
 
@@ -138,9 +209,8 @@ git pull --ff-only
 `python3.14 -m venv .venv` آن را بسازید. گزینهٔ `outreach` برای وابستگی‌های
 `tests/test_outreach_script.py` لازم است؛ اجرای خود ربات به آن نیاز ندارد.
 
-تست بانک سؤال فقط خواندنی است، اما مسیر ثابت `data/bazi_chi_bot.sqlite3` را بررسی
-می‌کند. اگر `DATABASE_PATH` سرور به مسیر دیگری اشاره می‌کند، به‌جای دستور آخر،
-فرمان زیر را اجرا کنید و بانک واقعی را جداگانه با اتصال فقط‌خواندنی بررسی کنید:
+تست بانک سؤال فقط خواندنی است؛ بدون دیتابیس محلی کنار گذاشته می‌شود. برای بررسی
+بانک واقعی سرور، فرمان زیر را اجرا کنید. اسکریپت استقرار هم همین بررسی را انجام می‌دهد:
 
 ```bash
 .venv/bin/pytest -q --ignore=tests/test_question_bank.py
