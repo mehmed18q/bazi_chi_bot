@@ -17,6 +17,7 @@ from ..game import GameService
 from ..persistence.sponsors import Sponsor
 from .access import is_free_event
 from .keyboards import required_sponsors_keyboard
+from .shared import ProfileSetup
 
 logger = logging.getLogger(__name__)
 
@@ -111,8 +112,8 @@ def sponsor_gate_text(check: SponsorCheck) -> str:
         names = "، ".join(escape(sponsor.title) for sponsor in check.unavailable_channels)
         return (
             "⚠️ <b>بررسی عضویت موقتاً ممکن نیست.</b>\n\n"
-            f"ربات به فهرست اعضای «{names}» دسترسی ندارد. "
-            "مدیر کانال باید بازی‌چی را به‌عنوان ادمین اضافه کند؛ سپس دوباره بررسی کن."
+            f"ربات نتوانست عضویت در «{names}» را بررسی کند. کمی بعد دوباره تلاش کن؛ "
+            "اگر مشکل ادامه داشت، مدیر کانال باید دسترسی بازی‌چی را بررسی کند."
         )
     return (
         "🔒 <b>برای استفاده از بازی‌چی، ابتدا عضو اسپانسرهای زیر شو.</b>\n\n"
@@ -163,8 +164,10 @@ class SponsorMembershipMiddleware(BaseMiddleware):
             return await handler(event, data)
 
         state = data.get("state")
-        if state is not None and str(await state.get_state()).endswith(
-            "ProfileSetup:waiting_for_name"
+        if (
+            isinstance(event, Message)
+            and state is not None
+            and await state.get_state() == ProfileSetup.waiting_for_name.state
         ):
             return await handler(event, data)
 

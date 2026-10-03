@@ -176,13 +176,13 @@ V2Ray/Clash/sing-box را مستقیم داخل این آرایه نگذارید
 
 ```bash
 .venv/bin/pip install -e '.[outreach]'
-.venv/bin/python scripts/send_opt_in_invitations.py --import-excel
+.venv/bin/python invitation/send_opt_in_invitations.py --import-excel
 ```
 
 برای پاک‌سازی دیتابیس موجود بدون ورود دوبارهٔ اکسل:
 
 ```bash
-.venv/bin/python scripts/send_opt_in_invitations.py --normalize-phones
+.venv/bin/python invitation/send_opt_in_invitations.py --normalize-phones
 ```
 
 هر دو دستور در پایان، تعداد ردیف‌های باقی‌ماندهٔ هر سورس را چاپ می‌کنند. ورود مجدد به
@@ -193,14 +193,14 @@ V2Ray/Clash/sing-box را مستقیم داخل این آرایه نگذارید
 پیش‌نمایش بدون اتصال به تلگرام:
 
 ```bash
-.venv/bin/python scripts/send_opt_in_invitations.py --source test --count 1 --dry-run
+.venv/bin/python invitation/send_opt_in_invitations.py --source test --count 1 --dry-run
 ```
 
 ارسال واقعی برای یک سورس و تعداد مشخصی ردیفِ در انتظار:
 
 ```bash
-.venv/bin/python scripts/send_opt_in_invitations.py --source test --count 1
-.venv/bin/python scripts/send_opt_in_invitations.py --source vendor_user --count 20
+.venv/bin/python invitation/send_opt_in_invitations.py --source test --count 1
+.venv/bin/python invitation/send_opt_in_invitations.py --source vendor_user --count 20
 ```
 
 `--count` تعداد ردیف‌هایی است که در این اجرا بررسی می‌شوند. پس از هر بررسی، `status`

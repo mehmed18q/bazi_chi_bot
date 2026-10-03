@@ -24,7 +24,7 @@ from .keyboards import (
     payment_settings_keyboard,
     profile_name_keyboard,
 )
-from .shared import profile_name_text, safe_edit, safe_send, telegram_user
+from .shared import ProfileSetup, profile_name_text, safe_edit, safe_send, telegram_user
 
 logger = logging.getLogger(__name__)
 
@@ -111,8 +111,14 @@ class PaymentAccessMiddleware(BaseMiddleware):
             return await handler(event, data)
 
         state = data.get("state")
-        if state is not None and await state.get_state() == PaymentSetup.waiting_for_receipt.state:
-            return await handler(event, data)
+        if isinstance(event, Message) and state is not None:
+            current_state = await state.get_state()
+            command = (event.text or "").split(maxsplit=1)[0].split("@", 1)[0]
+            if current_state in {
+                PaymentSetup.waiting_for_receipt.state,
+                ProfileSetup.waiting_for_name.state,
+            } and (not command.startswith("/") or command == "/cancel"):
+                return await handler(event, data)
 
         user = await self.service.get_user(event.from_user.id)
         if user is not None and user.is_activated:
@@ -169,7 +175,10 @@ def register_handlers(
         await state.clear()
         await show_activation_gate(message, service)
 
-    @router.message(PaymentSetup.waiting_for_receipt, F.text | F.photo)
+    @router.message(
+        PaymentSetup.waiting_for_receipt,
+        F.photo | (F.text & ~F.text.startswith("/")),
+    )
     async def payment_receipt_submit(message: Message, state: FSMContext, bot: Bot) -> None:
         if message.from_user is None:
             return
@@ -232,7 +241,7 @@ def register_handlers(
             reply_markup=activation_keyboard(),
         )
 
-    @router.message(PaymentSetup.waiting_for_receipt)
+    @router.message(PaymentSetup.waiting_for_receipt, ~F.text.startswith("/"))
     async def payment_receipt_invalid(message: Message) -> None:
         await message.answer("فقط عکس رسید یا متن مشخصات واریز را بفرست.")
 
@@ -333,7 +342,7 @@ def register_handlers(
             reply_markup=payment_settings_keyboard(),
         )
 
-    @router.message(StateFilter(PaymentAdminSetup), F.text)
+    @router.message(StateFilter(PaymentAdminSetup), F.text & ~F.text.startswith("/"))
     async def payment_setting_save(message: Message, state: FSMContext) -> None:
         if message.from_user is None or not is_admin(message.from_user.id):
             await state.clear()

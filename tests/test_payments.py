@@ -1,5 +1,5 @@
 import asyncio
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -12,7 +12,12 @@ from bazi_chi_bot.game import GameService
 from bazi_chi_bot.handlers import build_router
 from bazi_chi_bot.models import GameType, PaymentReceiptStatus, User
 from bazi_chi_bot.telegram.keyboards import admin_menu_keyboard
-from bazi_chi_bot.telegram.payments import PaymentAccessMiddleware, activation_gate_text
+from bazi_chi_bot.telegram.payments import (
+    PaymentAccessMiddleware,
+    PaymentSetup,
+    activation_gate_text,
+)
+from bazi_chi_bot.telegram.shared import ProfileSetup
 
 
 async def test_users_get_stable_internal_ids_and_admin_can_change_payment_settings(
@@ -247,7 +252,7 @@ async def test_payment_middleware_blocks_until_receipt_is_approved(service, play
     handler = AsyncMock(return_value="handled")
     message = Message(
         message_id=1,
-        date=datetime.now(timezone.utc),
+        date=datetime.now(UTC),
         chat=Chat(id=first.telegram_id, type=ChatType.PRIVATE),
         from_user=TelegramUser(
             id=first.telegram_id,
@@ -275,7 +280,7 @@ async def test_free_callbacks_and_solo_game_work_before_purchase(service, player
     telegram_user = TelegramUser(id=user.telegram_id, is_bot=False, first_name=user.first_name)
     chat_message = Message(
         message_id=1,
-        date=datetime.now(timezone.utc),
+        date=datetime.now(UTC),
         chat=Chat(id=user.telegram_id, type=ChatType.PRIVATE),
         from_user=telegram_user,
         text="بازی",
@@ -304,3 +309,43 @@ async def test_free_callbacks_and_solo_game_work_before_purchase(service, player
 
     await service.set_user_activation(user.telegram_id, 999, True)
     assert await middleware(handler, callback("tour:mode:s"), {}) == "handled"
+
+
+async def test_receipt_input_state_cannot_open_premium_buttons(service, players):
+    user = players[0]
+    middleware = PaymentAccessMiddleware(service, frozenset())
+    handler = AsyncMock(return_value="handled")
+    telegram_user = TelegramUser(id=user.telegram_id, is_bot=False, first_name=user.first_name)
+    message = Message(
+        message_id=1, date=datetime.now(UTC),
+        chat=Chat(id=user.telegram_id, type=ChatType.PRIVATE),
+        from_user=telegram_user, text="مشخصات رسید",
+    )
+    callback = CallbackQuery(
+        id="button", from_user=telegram_user, chat_instance="test",
+        message=message, data="menu:tournament",
+    )
+    state = SimpleNamespace(get_state=AsyncMock(return_value=PaymentSetup.waiting_for_receipt.state))
+    assert await middleware(handler, message, {"state": state}) == "handled"
+    with patch("bazi_chi_bot.telegram.payments.show_activation_gate", new_callable=AsyncMock) as gate:
+        assert await middleware(handler, callback, {"state": state}) is None
+        assert await middleware(handler, message.model_copy(update={"text": "/stats"}), {"state": state}) is None
+        assert gate.await_count == 2
+
+
+async def test_free_user_can_edit_profile_without_bypassing_premium(service, players):
+    user = players[0]
+    middleware = PaymentAccessMiddleware(service, frozenset())
+    handler = AsyncMock(return_value="handled")
+    message = Message(
+        message_id=1, date=datetime.now(UTC),
+        chat=Chat(id=user.telegram_id, type=ChatType.PRIVATE),
+        from_user=TelegramUser(id=user.telegram_id, is_bot=False, first_name=user.first_name),
+        text="نام جدید",
+    )
+    state = SimpleNamespace(get_state=AsyncMock(return_value=ProfileSetup.waiting_for_name.state))
+    assert await middleware(handler, message, {"state": state}) == "handled"
+    assert await middleware(handler, message.model_copy(update={"text": "/cancel"}), {"state": state}) == "handled"
+    with patch("bazi_chi_bot.telegram.payments.show_activation_gate", new_callable=AsyncMock) as gate:
+        assert await middleware(handler, message.model_copy(update={"text": "/stats"}), {"state": state}) is None
+        gate.assert_awaited_once()

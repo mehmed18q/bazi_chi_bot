@@ -101,7 +101,7 @@ def session_card(
     builder = InlineKeyboardBuilder()
 
     if session.status == "waiting":
-        text += "\n\n⏳ اعضا «حاضرم!» را بزنند؛ شروع‌کننده بعد مسابقه را آغاز کند."
+        text += "\n\n⏳ اعضا «حاضرم!» را بزنند؛ سپس شروع‌کننده مسابقه را آغاز کند."
         builder.button(text="🙋 حاضرم!", callback_data=f"grp:join:{session.id}")
         builder.button(text="▶️ شروع بازی", callback_data=f"grp:start:{session.id}")
         builder.button(text="🛑 لغو", callback_data=f"grp:cancel:{session.id}")
@@ -354,6 +354,11 @@ def build_group_router(
         if message.from_user.id not in admin_ids and (account is None or not account.is_activated):
             await message.answer("برای مسابقهٔ گروهی به اشتراک ویژه نیاز داری.")
             return
+        if message.from_user.id not in admin_ids:
+            sponsors = await service.active_sponsors()
+            if sponsors and not (await check_sponsors(bot, message.from_user.id, sponsors)).allowed:
+                await message.answer("اول عضویت‌های لازم را در گفت‌وگوی خصوصی کامل کن.")
+                return
         try:
             session, feedback = await service.group_games.text_input(
                 session_id, message.from_user.id, "answer", answer
@@ -441,6 +446,9 @@ def build_group_router(
             return
         session = await bound(callback, session_id)
         if session is None:
+            return
+        if session.status != "waiting":
+            await callback.answer(ERROR_TEXT["started"], show_alert=True)
             return
         await service.save_user(telegram_user(callback.from_user))
         await service.referrals.claim(callback.from_user.id, session.creator_id, "group")

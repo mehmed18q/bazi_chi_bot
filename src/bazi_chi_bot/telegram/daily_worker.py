@@ -53,8 +53,9 @@ class DailyChallengeWorker:
     async def _deliver_pending(self) -> None:
         # Keep one pass bounded so a large broadcast does not postpone the
         # next schedule reconciliation indefinitely.
+        deferred: set[tuple[str, int, str]] = set()
         for _ in range(100):
-            item = await self.service.next_notification()
+            item = await self.service.next_notification(deferred)
             if item is None:
                 return
             day, user_id, event = item
@@ -91,6 +92,7 @@ class DailyChallengeWorker:
                 return
             except TelegramAPIError as error:
                 logger.warning("Daily challenge notification for %s failed: %s", user_id, error)
-                return
+                deferred.add(item)
+                continue
             else:
                 await self.service.record_notification(day, user_id, event)

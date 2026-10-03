@@ -188,16 +188,24 @@ class DailyChallengeService:
                     (current, challenge.challenge_date),
                 )
 
-    async def next_notification(self) -> tuple[str, int, str] | None:
+    async def next_notification(
+        self, skip: set[tuple[str, int, str]] | None = None
+    ) -> tuple[str, int, str] | None:
+        deferred = tuple(skip or ())
+        exclusions = "".join(
+            " AND NOT (challenge_date = ? AND user_id = ? AND event = ?)"
+            for _ in deferred
+        )
         async with self.database.connect() as connection:
             row = await (
                 await connection.execute(
-                    """
+                    f"""
                     SELECT challenge_date, user_id, event FROM daily_notifications
-                    WHERE delivered_at IS NULL
+                    WHERE delivered_at IS NULL{exclusions}
                     ORDER BY challenge_date, CASE event WHEN 'start' THEN 0 ELSE 1 END, user_id
                     LIMIT 1
-                    """
+                    """,
+                    tuple(value for item in deferred for value in item),
                 )
             ).fetchone()
         return (row["challenge_date"], row["user_id"], row["event"]) if row else None

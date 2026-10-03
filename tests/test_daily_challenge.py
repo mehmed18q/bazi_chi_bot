@@ -1,7 +1,9 @@
 import time
 from datetime import date
+from types import SimpleNamespace
 
 import pytest
+from aiogram.exceptions import TelegramAPIError
 
 from bazi_chi_bot.daily_schedule import challenge_window, local_date, next_reminder_at
 from bazi_chi_bot.errors import DailyChallengeClosed
@@ -95,6 +97,28 @@ async def test_daily_notifications_are_personalized_and_idempotent(service, play
     assert "شرکت کردی" in participated
     assert "شرکت نکردی" in missed
 
+
+async def test_failed_daily_delivery_does_not_block_other_users(service, players, monkeypatch):
+    start, _ = _challenge_times()
+    monkeypatch.setattr("time.time", lambda: start + 10)
+    challenge = await service.daily.ensure_today()
+    await service.daily.queue_notifications(challenge, "start")
+
+    class BotStub:
+        def __init__(self):
+            self.delivered = []
+
+        async def send_message(self, user_id, text, **kwargs):
+            if user_id == players[0].telegram_id:
+                raise TelegramAPIError(method=SimpleNamespace(), message="temporary failure")
+            self.delivered.append(user_id)
+
+    bot = BotStub()
+    await DailyChallengeWorker(service.daily, bot)._deliver_pending()
+    assert bot.delivered == [players[1].telegram_id]
+    assert await service.daily.next_notification() == (
+        challenge.challenge_date, players[0].telegram_id, "start"
+    )
 
 async def test_daily_reminder_repeats_without_replacing_admin_countdown(database, service, players):
     start, _ = _challenge_times()

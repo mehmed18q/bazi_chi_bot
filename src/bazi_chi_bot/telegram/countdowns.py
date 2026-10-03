@@ -42,9 +42,11 @@ def register_handlers(
         assert countdown_service is not None
         users = await countdown_service.all_users()
         return (
-            "💌 <b>تنظیم شمارش‌معکوس</b>\n\n"
-            "مخاطب را انتخاب کن. این فهرست فقط شامل کسانی است که قبلاً ربات را "
-            "استارت کرده‌اند:",
+            (
+                "💌 <b>تنظیم شمارش‌معکوس</b>\n\n"
+                "مخاطب را انتخاب کن. این فهرست فقط شامل کسانی است که قبلاً "
+                "ربات را شروع کرده‌اند:"
+            ),
             countdown_users_keyboard(users),
         )
 
@@ -79,7 +81,7 @@ def register_handlers(
         await state.clear()
         await message.answer("افزودن سؤال لغو شد. ↩️")
 
-    @router.message(QuestionSetup.waiting_for_text, F.text)
+    @router.message(QuestionSetup.waiting_for_text, F.text & ~F.text.startswith("/"))
     async def question_text_received(message: Message, state: FSMContext) -> None:
         if message.from_user is None or message.from_user.id not in countdown_admin_ids:
             await state.clear()
@@ -123,7 +125,7 @@ def register_handlers(
             return
         try:
             target_datetime = parse_target_datetime(" ".join(parts[1:]), countdown_timezone)
-            countdown, replaced = await countdown_service.create(
+            _, replaced = await countdown_service.create(
                 message.from_user.id,
                 target.telegram_id,
                 int(target_datetime.timestamp()),
@@ -209,7 +211,7 @@ def register_handlers(
             reply_markup=menu_keyboard(is_countdown_admin=True),
         )
 
-    @router.message(CountdownSetup.waiting_for_datetime, F.text)
+    @router.message(CountdownSetup.waiting_for_datetime, F.text & ~F.text.startswith("/"))
     async def countdown_datetime_message(message: Message, state: FSMContext) -> None:
         if not await require_countdown_admin(message):
             await state.clear()

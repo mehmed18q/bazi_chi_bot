@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from html import escape
+from sqlite3 import IntegrityError
 
 from aiogram import Bot, F, Router
 from aiogram.enums import ChatMemberStatus, ChatType
@@ -250,7 +251,7 @@ def register_handlers(
         await state.clear()
         await message.answer("ارسال پیام لغو شد.")
 
-    @router.message(AdminMessageSetup.waiting_for_text, F.text)
+    @router.message(AdminMessageSetup.waiting_for_text, F.text & ~F.text.startswith("/"))
     async def admin_message_send(message: Message, state: FSMContext, bot: Bot) -> None:
         if message.from_user is None or message.from_user.id not in countdown_admin_ids:
             await state.clear()
@@ -334,7 +335,7 @@ def register_handlers(
             "افزودن اسپانسر لغو شد.", reply_markup=menu_keyboard(is_countdown_admin=True)
         )
 
-    @router.message(SponsorSetup.waiting_for_details, F.text)
+    @router.message(SponsorSetup.waiting_for_details, F.text & ~F.text.startswith("/"))
     async def sponsor_details(message: Message, state: FSMContext, bot: Bot) -> None:
         data = await state.get_data()
         kind = data.get("sponsor_kind")
@@ -371,7 +372,7 @@ def register_handlers(
                 "به‌عنوان ادمین اضافه کن."
             )
             return
-        except Exception:
+        except IntegrityError, ValueError:
             await message.answer("این اسپانسر قبلاً ثبت شده یا اطلاعاتش معتبر نیست.")
             return
         await state.clear()
@@ -725,7 +726,7 @@ def register_handlers(
             reply_markup=profile_name_keyboard(user.nickname_is_custom),
         )
 
-    @router.message(ProfileSetup.waiting_for_name, F.text)
+    @router.message(ProfileSetup.waiting_for_name, F.text & ~F.text.startswith("/"))
     async def profile_name_save(message: Message, state: FSMContext) -> None:
         if message.from_user is None:
             return
@@ -744,7 +745,7 @@ def register_handlers(
             reply_markup=profile_name_keyboard(user.nickname_is_custom),
         )
 
-    @router.message(ProfileSetup.waiting_for_name)
+    @router.message(ProfileSetup.waiting_for_name, ~F.text.startswith("/"))
     async def profile_name_invalid(message: Message) -> None:
         await message.answer("نام را به‌صورت متن بفرست؛ حداکثر ۴۰ کاراکتر.")
 

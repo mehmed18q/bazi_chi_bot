@@ -25,7 +25,8 @@ async def referral_status_text(service: GameService, user_id: int, premium: bool
     progress = (
         "اشتراک ویژه‌ات فعال است. ⭐"
         if premium else
-        f"برای اشتراک رایگان، <b>{stats.remaining}</b> دعوتِ فعال‌شدهٔ دیگر لازم داری."
+        f"برای فعال‌شدن رایگان اشتراک ویژه، <b>{stats.remaining}</b> "
+        "دعوتِ فعال‌شدهٔ دیگر لازم داری."
     )
     return (
         f"👥 دعوت‌ها: <b>{stats.invited}</b> نفر | فعال‌شده‌ها: "
@@ -122,7 +123,7 @@ def register_handlers(
         await state.clear()
         await message.answer("تغییر حد نصاب لغو شد.")
 
-    @router.message(ReferralAdminSetup.waiting_for_required, F.text)
+    @router.message(ReferralAdminSetup.waiting_for_required, F.text & ~F.text.startswith("/"))
     async def referral_admin_save(message: Message, state: FSMContext) -> None:
         if message.from_user is None or message.from_user.id not in admin_ids:
             await state.clear()

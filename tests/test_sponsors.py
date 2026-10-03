@@ -1,17 +1,18 @@
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 from aiogram.enums import ChatMemberStatus, ChatType
 from aiogram.exceptions import TelegramBadRequest
-from aiogram.types import Chat, Message, User as TelegramUser
+from aiogram.types import CallbackQuery, Chat, Message
+from aiogram.types import User as TelegramUser
 
 from bazi_chi_bot.persistence.sponsors import Sponsor
 from bazi_chi_bot.telegram.keyboards import required_sponsors_keyboard
 from bazi_chi_bot.telegram.sponsors import (
     SponsorMembershipMiddleware,
-    deactivate_invalid_sponsors,
     check_sponsors,
+    deactivate_invalid_sponsors,
     is_active_member,
     sponsor_gate_text,
 )
@@ -108,7 +109,7 @@ async def test_admin_bypasses_membership_middleware():
     handler = AsyncMock(return_value="handled")
     message = Message(
         message_id=1,
-        date=datetime.now(timezone.utc),
+        date=datetime.now(UTC),
         chat=Chat(id=101, type=ChatType.PRIVATE),
         from_user=TelegramUser(id=101, is_bot=False, first_name="مدیر"),
         text="آمار",
@@ -119,6 +120,32 @@ async def test_admin_bypasses_membership_middleware():
     assert result == "handled"
     handler.assert_awaited_once()
     service.active_sponsors.assert_not_awaited()
+
+
+async def test_profile_input_state_cannot_open_premium_buttons(service, players):
+    user = players[0]
+    await service.set_user_activation(user.telegram_id, 999, True)
+    middleware = SponsorMembershipMiddleware(service, frozenset())
+    handler = AsyncMock(return_value="handled")
+    telegram_user = TelegramUser(id=user.telegram_id, is_bot=False, first_name=user.first_name)
+    message = Message(
+        message_id=1, date=datetime.now(UTC),
+        chat=Chat(id=user.telegram_id, type=ChatType.PRIVATE),
+        from_user=telegram_user, text="نام جدید",
+    )
+    callback = CallbackQuery(
+        id="button", from_user=telegram_user, chat_instance="test",
+        message=message, data="menu:tournament",
+    )
+    state = SimpleNamespace(get_state=AsyncMock(return_value="ProfileSetup:waiting_for_name"))
+    with (
+        patch.object(service, "active_sponsors", new=AsyncMock(return_value=[object()])),
+        patch("bazi_chi_bot.telegram.sponsors.check_sponsors", new=AsyncMock(return_value=SimpleNamespace(allowed=False))),
+        patch("bazi_chi_bot.telegram.sponsors.show_sponsor_gate", new_callable=AsyncMock) as gate,
+    ):
+        assert await middleware(handler, message, {"state": state}) == "handled"
+        assert await middleware(handler, callback, {"state": state, "bot": SimpleNamespace()}) is None
+        gate.assert_awaited_once()
 
 
 async def test_startup_deactivates_inaccessible_channel_but_not_bot():
