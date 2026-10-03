@@ -45,6 +45,7 @@ from .persistence.games import GameRepository
 from .persistence.sponsors import Sponsor, SponsorRepository
 from .services.challenges import ChallengeService
 from .services.daily_challenges import DailyChallengeService
+from .services.group_games import GroupGameService
 from .services.matches import MatchService
 from .services.solo import BotAdvance, SoloOpponent
 from .services.tournaments import TournamentService
@@ -73,6 +74,7 @@ class GameService:
         self.solo = SoloOpponent(self.matches, self.queries)
         self.daily = DailyChallengeService(database, self.matches)
         self.tournaments = TournamentService(database, self.matches)
+        self.group_games = GroupGameService(database)
         self.sponsors = SponsorRepository(database)
 
     async def active_sponsors(self) -> list[Sponsor]:

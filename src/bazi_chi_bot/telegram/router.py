@@ -12,7 +12,7 @@ from ..countdown import (
 from ..game import (
     GameService,
 )
-from . import challenges, countdowns, daily, gameplay, menus, payments, tournaments
+from . import challenges, countdowns, daily, gameplay, groups, menus, payments, tournaments
 from .payments import PaymentAccessMiddleware
 from .sponsors import SponsorMembershipMiddleware
 
@@ -55,5 +55,6 @@ def build_router(
     )
     gameplay.register_handlers(router, service)
     tournaments.register_handlers(router, service)
+    groups.register_private_handlers(router, service)
     challenges.register_handlers(router, service)
     return router

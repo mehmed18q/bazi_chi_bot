@@ -11,7 +11,7 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramAPIError, TelegramNetworkError
-from aiogram.types import BotCommand, BotCommandScopeChat, User
+from aiogram.types import BotCommand, BotCommandScopeAllGroupChats, BotCommandScopeChat, User
 from aiohttp_socks import (
     ProxyConnectionError as AiohttpSocksProxyConnectionError,
     ProxyError as AiohttpSocksProxyError,
@@ -28,8 +28,9 @@ from .countdown import (
 from .db import Database
 from .game import GameService
 from .handlers import build_router
-from .telegram.sponsors import deactivate_invalid_sponsors
 from .telegram.daily_worker import DailyChallengeWorker
+from .telegram.groups import build_group_router
+from .telegram.sponsors import deactivate_invalid_sponsors
 
 logger = logging.getLogger(__name__)
 
@@ -120,6 +121,10 @@ async def _register_bot_commands(bot: Bot, admin_ids: frozenset[int]) -> None:
         BotCommand(command="help", description="راهنمای بازی"),
     ]
     await bot.set_my_commands(public_commands)
+    await bot.set_my_commands(
+        [BotCommand(command="play", description="ساخت مسابقهٔ چندنفرهٔ گروهی")],
+        scope=BotCommandScopeAllGroupChats(),
+    )
     admin_commands = public_commands + [
         BotCommand(command="countdown", description="ساخت شمارش‌معکوس"),
         BotCommand(command="countdowns", description="شمارش‌معکوس‌های فعال"),
@@ -213,6 +218,9 @@ async def _serve_connection(
             payment_reviewer_ids=payment_reviewer_ids,
             countdown_timezone=countdown_timezone,
         )
+    )
+    dispatcher.include_router(
+        build_group_router(service, admin_ids=admin_ids | payment_reviewer_ids)
     )
     scheduler_task: asyncio.Task[None] | None = None
     daily_task: asyncio.Task[None] | None = None

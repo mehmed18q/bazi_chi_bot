@@ -956,4 +956,79 @@ MIGRATIONS: tuple[str, ...] = (
     ) WHERE id IS NULL;
     DROP TABLE tournament_migration_missing_ids;
     """,
+    """
+    CREATE TABLE group_sessions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        chat_id INTEGER NOT NULL,
+        message_id INTEGER NOT NULL,
+        creator_id INTEGER NOT NULL REFERENCES users(telegram_id),
+        game_type TEXT NOT NULL CHECK (game_type IN (
+            'rock_paper_scissors', 'gol_ya_pooch', 'tic_tac_toe',
+            'word_guess', 'mastermind', 'truth_or_dare')),
+        total_rounds INTEGER NOT NULL DEFAULT 0 CHECK (total_rounds >= 0),
+        current_round INTEGER NOT NULL DEFAULT 1,
+        phase TEXT NOT NULL DEFAULT 'waiting',
+        board TEXT NOT NULL DEFAULT '.........',
+        secret_choice TEXT,
+        prompt_text TEXT,
+        answer_text TEXT,
+        status TEXT NOT NULL DEFAULT 'waiting'
+            CHECK (status IN ('waiting', 'active', 'finished', 'cancelled')),
+        last_result TEXT,
+        created_at INTEGER NOT NULL
+    );
+    CREATE UNIQUE INDEX idx_group_sessions_open_chat ON group_sessions(chat_id)
+        WHERE status IN ('waiting', 'active');
+    CREATE TABLE group_players (
+        session_id INTEGER NOT NULL REFERENCES group_sessions(id) ON DELETE CASCADE,
+        user_id INTEGER NOT NULL REFERENCES users(telegram_id),
+        display_name TEXT NOT NULL,
+        score INTEGER NOT NULL DEFAULT 0 CHECK (score >= 0),
+        joined_at INTEGER NOT NULL,
+        PRIMARY KEY (session_id, user_id)
+    );
+    CREATE TABLE group_round_moves (
+        session_id INTEGER NOT NULL REFERENCES group_sessions(id) ON DELETE CASCADE,
+        round_number INTEGER NOT NULL,
+        phase TEXT NOT NULL,
+        user_id INTEGER NOT NULL,
+        choice TEXT NOT NULL,
+        PRIMARY KEY (session_id, round_number, phase, user_id),
+        FOREIGN KEY (session_id, user_id) REFERENCES group_players(session_id, user_id)
+    );
+    CREATE TABLE group_attempts (
+        session_id INTEGER NOT NULL REFERENCES group_sessions(id) ON DELETE CASCADE,
+        round_number INTEGER NOT NULL,
+        user_id INTEGER NOT NULL,
+        attempt_number INTEGER NOT NULL,
+        guess TEXT NOT NULL,
+        feedback TEXT NOT NULL,
+        PRIMARY KEY (session_id, round_number, user_id, attempt_number),
+        FOREIGN KEY (session_id, user_id) REFERENCES group_players(session_id, user_id)
+    );
+
+    -- Keep aggregate-only balances introduced after the previous migration.
+    INSERT INTO score_events (user_id, reason, amount, created_at)
+        SELECT telegram_id, 'legacy', points_won, unixepoch() FROM user_stats
+        WHERE points_won > 0 AND NOT EXISTS (
+            SELECT 1 FROM score_events s WHERE s.user_id = user_stats.telegram_id
+        );
+    UPDATE user_stats SET points_won = (
+        SELECT COALESCE(SUM(amount), 0) FROM score_events s
+        WHERE s.user_id = user_stats.telegram_id
+    );
+    CREATE TEMP TABLE group_migration_missing_ids (
+        user_rowid INTEGER PRIMARY KEY, new_id INTEGER NOT NULL
+    );
+    INSERT INTO group_migration_missing_ids (user_rowid, new_id)
+        SELECT rowid,
+               (SELECT COALESCE(MAX(id), 0) FROM users)
+                   + ROW_NUMBER() OVER (ORDER BY rowid)
+        FROM users WHERE id IS NULL;
+    UPDATE users SET id = (
+        SELECT new_id FROM group_migration_missing_ids
+        WHERE user_rowid = users.rowid
+    ) WHERE id IS NULL;
+    DROP TABLE group_migration_missing_ids;
+    """,
 )

@@ -18,7 +18,8 @@ async def reset_history(database: Database) -> dict[str, int]:
         counts: dict[str, int] = {}
         history_tables = (
             "daily_notifications", "question_answers", "challenge_rounds",
-            "choice_observations",
+            "choice_observations", "group_attempts", "group_round_moves",
+            "group_players", "group_sessions",
             "score_events", "games", "tournaments", "countdowns", "daily_challenges",
         )
         for table in history_tables:
@@ -50,7 +51,7 @@ async def reset_history(database: Database) -> dict[str, int]:
                  ) THEN RAISE(ABORT, 'Answer participants do not match the game') END;
                END"""
         )
-        await connection.execute("DELETE FROM sqlite_sequence WHERE name IN ('games', 'tournaments', 'countdowns', 'score_events', 'challenge_rounds', 'question_answers', 'choice_observations')")
+        await connection.execute("DELETE FROM sqlite_sequence WHERE name IN ('games', 'tournaments', 'group_sessions', 'countdowns', 'score_events', 'challenge_rounds', 'question_answers', 'choice_observations')")
         row = await (
             await connection.execute("SELECT count(*) FROM users WHERE telegram_id != -1")
         ).fetchone()

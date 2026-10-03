@@ -16,6 +16,7 @@ from ..game import (
     GameService,
 )
 from ..models import GameType
+from ..services.group_games import GroupSessionError
 from ..ui import (
     HELP_TEXT,
     START_TEXT,
@@ -392,6 +393,27 @@ def register_handlers(
             if not check.allowed:
                 await show_sponsor_gate(message, check, payload=payload)
                 return
+        if payload.startswith("group_"):
+            try:
+                session = await service.group_games.get(int(payload.removeprefix("group_")))
+            except (ValueError, GroupSessionError):
+                await message.answer("مسابقهٔ گروهی پیدا نشد.")
+            else:
+                if not any(player.user_id == user.telegram_id for player in session.players):
+                    await message.answer("اول در گروه روی «حاضرم!» بزن.")
+                elif session.game_type is GameType.WORD_GUESS:
+                    await message.answer(
+                        f"🔤 مسابقهٔ گروهی #{session.id}\n"
+                        f"کلمه یا حدست را با <code>/gword {session.id} کلمه</code> بفرست."
+                    )
+                elif session.game_type is GameType.MASTERMIND:
+                    await message.answer(
+                        f"🎨 مسابقهٔ گروهی #{session.id}\n"
+                        f"کد یا حدست را با <code>/gcode {session.id} 🔵,🟡,⚫,⚪</code> بفرست."
+                    )
+                else:
+                    await message.answer("🎲 دکمه‌های مسابقهٔ گروهی داخل همان گروه هستند.")
+            return
         if payload.startswith("join_"):
             token = payload.removeprefix("join_")
             try:
