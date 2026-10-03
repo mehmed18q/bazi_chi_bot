@@ -15,6 +15,7 @@ from aiogram.types import CallbackQuery, Message, TelegramObject
 
 from ..game import GameService
 from ..persistence.sponsors import Sponsor
+from .access import is_free_event
 from .keyboards import required_sponsors_keyboard
 
 logger = logging.getLogger(__name__)
@@ -151,6 +152,8 @@ class SponsorMembershipMiddleware(BaseMiddleware):
         if not isinstance(event, (Message, CallbackQuery)) or event.from_user is None:
             return await handler(event, data)
         if event.from_user.id in self.admin_ids:
+            return await handler(event, data)
+        if await is_free_event(self.service, event):
             return await handler(event, data)
         if isinstance(event, Message) and event.text and event.text.startswith("/start"):
             return await handler(event, data)

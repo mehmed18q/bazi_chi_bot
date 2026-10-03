@@ -53,8 +53,8 @@ def build_router(
         countdown_admin_ids=admin_ids,
         countdown_timezone=countdown_timezone,
     )
-    gameplay.register_handlers(router, service)
+    gameplay.register_handlers(router, service, admin_ids=admin_ids)
     tournaments.register_handlers(router, service)
     groups.register_private_handlers(router, service)
-    challenges.register_handlers(router, service)
+    challenges.register_handlers(router, service, admin_ids=admin_ids)
     return router

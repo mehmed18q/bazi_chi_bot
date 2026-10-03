@@ -174,19 +174,13 @@ class DailyChallengeService:
                 ).fetchone()
                 if row is None or row["end_queued_at"] is not None:
                     return
-            exempt_ids = tuple(sorted(self.activation_exempt_ids))
-            exempt_sql = (
-                f" OR telegram_id IN ({', '.join('?' for _ in exempt_ids)})"
-                if exempt_ids
-                else ""
-            )
             await connection.execute(
-                f"""
+                """
                 INSERT OR IGNORE INTO daily_notifications (challenge_date, user_id, event)
                 SELECT ?, telegram_id, ? FROM users
-                WHERE telegram_id != -1 AND (is_activated = 1{exempt_sql})
+                WHERE telegram_id != -1
                 """,
-                (challenge.challenge_date, event, *exempt_ids),
+                (challenge.challenge_date, event),
             )
             if event == "end":
                 await connection.execute(

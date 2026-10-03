@@ -16,14 +16,15 @@ def menu_keyboard(
 ) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(text="🎮 شروع بازی", callback_data="menu:new")
-    builder.button(text="🏆 تورنومنت", callback_data="menu:tournament")
+    builder.button(text="🏆 تورنومنت ⭐", callback_data="menu:tournament")
     builder.button(text="🎯 چالش روزانه", callback_data="menu:daily_challenge")
-    builder.button(text="📊 آمار من", callback_data="menu:stats")
+    builder.button(text="⭐ اشتراک ویژه", callback_data="menu:premium")
+    builder.button(text="📊 آمار من ⭐", callback_data="menu:stats")
     builder.button(text="👤 نام نمایشی", callback_data="menu:profile")
     if has_active_games:
         builder.button(text="🔄 ادامهٔ بازی", callback_data="menu:resume")
-    builder.button(text="🏆 لیست برترین بازیکن‌ها", callback_data="menu:leaderboard")
-    builder.button(text="🏅 برترین‌ها در همهٔ دوره‌ها", callback_data="menu:leaderboard:all_time")
+    builder.button(text="🏆 لیست برترین بازیکن‌ها ⭐", callback_data="menu:leaderboard")
+    builder.button(text="🏅 برترین‌ها در همهٔ دوره‌ها ⭐", callback_data="menu:leaderboard:all_time")
     builder.button(text="🏁 آخرین نتیجه", callback_data="menu:last")
     builder.button(text="❔ راهنما", callback_data="menu:help")
     builder.button(text="🛟 پشتیبانی", callback_data="menu:support")
@@ -59,6 +60,9 @@ def payment_settings_keyboard() -> InlineKeyboardMarkup:
 def activation_keyboard() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(text="📤 ارسال رسید پرداخت", callback_data="payment:send")
+    builder.button(text="🤖 بازی رایگان", callback_data="setup:solo")
+    builder.button(text="🏠 منوی اصلی", callback_data="menu:home")
+    builder.adjust(1)
     return builder.as_markup()
 
 
@@ -204,6 +208,8 @@ def game_types_keyboard(solo: bool = False) -> InlineKeyboardMarkup:
     builder.button(text="🎲 بازی شانسی", callback_data=f"{prefix}random")
     if not solo:
         builder.button(text="🤖 بازی تک‌نفره با ربات", callback_data="setup:solo")
+    else:
+        builder.button(text="⭐ بازی دونفره و تورنومنت", callback_data="menu:premium")
     builder.button(text="🏠 منوی اصلی", callback_data="menu:home")
     builder.adjust(2, 2, 2, 1, 1)
     return builder.as_markup()

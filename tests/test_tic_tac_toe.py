@@ -134,6 +134,7 @@ async def test_board_ui_and_invitation(service, players):
 
 
 async def test_telegram_setup_and_move_notify_both_players(service, players):
+    await service.set_user_activation(players[0].telegram_id, 999, True)
     router = build_router(service)
     handlers = {
         handler.callback.__name__: handler.callback for handler in router.callback_query.handlers

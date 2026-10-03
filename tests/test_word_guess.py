@@ -109,6 +109,8 @@ async def test_word_setup_and_live_attempt_count_notifications(service, players)
     assert {"setup:word:3", "setup:word:5", "setup:word:7", "setup:word:9"} <= round_callbacks
 
     first, second = players
+    await service.set_user_activation(first.telegram_id, 999, True)
+    await service.set_user_activation(second.telegram_id, 999, True)
     game = await service.create_game(first.telegram_id, 2, 3, GameType.WORD_GUESS)
     game = await service.join_game(game.invite_token, second.telegram_id)
     router = build_router(service)

@@ -4,7 +4,7 @@ from datetime import date
 import pytest
 
 from bazi_chi_bot.daily_schedule import challenge_window, local_date, next_reminder_at
-from bazi_chi_bot.errors import DailyChallengeClosed, DailyChallengeRequiresActivation
+from bazi_chi_bot.errors import DailyChallengeClosed
 from bazi_chi_bot.game import GameService
 from bazi_chi_bot.models import GameStatus, GameType
 from bazi_chi_bot.reset_database import reset_history
@@ -35,7 +35,7 @@ def test_tehran_window_and_next_reminder_boundaries():
     assert next_reminder_at(start - 300) == challenge_window(date(2026, 10, 1))[0] - 300
 
 
-async def test_daily_shared_config_one_attempt_and_activation(service, players, monkeypatch):
+async def test_daily_shared_config_one_attempt_for_free_users(service, players, monkeypatch):
     start, end = _challenge_times()
     monkeypatch.setattr("time.time", lambda: start + 30)
     monkeypatch.setattr(
@@ -49,10 +49,6 @@ async def test_daily_shared_config_one_attempt_and_activation(service, players, 
     assert challenge.secrets == (1, 1, 1)
     assert await service.daily.ensure_today() == challenge
 
-    with pytest.raises(DailyChallengeRequiresActivation):
-        await service.daily.start(first.telegram_id)
-    await service.set_user_activation(first.telegram_id, 999, True)
-    await service.set_user_activation(second.telegram_id, 999, True)
     first_game = await service.daily.start(first.telegram_id)
     second_game = await service.daily.start(second.telegram_id)
     assert first_game.id != second_game.id
@@ -104,10 +100,6 @@ async def test_daily_reminder_repeats_without_replacing_admin_countdown(database
     start, _ = _challenge_times()
     user = players[0]
     countdowns = CountdownService(database)
-    with pytest.raises(DailyChallengeRequiresActivation):
-        await countdowns.subscribe_daily_reminder(user.telegram_id, now=start)
-    receipt = await service.submit_payment_receipt(user.telegram_id, receipt_text="paid")
-    await service.review_payment_receipt(receipt.id, 999, True)
     reminder = await countdowns.subscribe_daily_reminder(user.telegram_id, now=start)
     assert reminder.kind == "daily_reminder"
     assert reminder.target_at == next_reminder_at(start)
@@ -154,8 +146,7 @@ async def test_admin_exemption_applies_to_reminder_delivery_and_daily_game(
     assert (await service.daily.start(admin_id)).creator_id == admin_id
     await service.daily.queue_notifications(challenge, "start")
     assert await service.daily.next_notification() == (challenge.challenge_date, admin_id, "start")
-    with pytest.raises(DailyChallengeRequiresActivation):
-        await countdowns.subscribe_daily_reminder(players[1].telegram_id, now=start)
+    assert (await countdowns.subscribe_daily_reminder(players[1].telegram_id, now=start)).kind == "daily_reminder"
 
 
 async def test_reminder_and_start_end_worker_delivery(database, service, players, monkeypatch):
@@ -255,5 +246,5 @@ async def test_history_reset_clears_daily_configuration_and_notifications(
     await service.daily.start(players[0].telegram_id)
     counts = await reset_history(database)
     assert counts["daily_challenges"] == 1
-    assert counts["daily_notifications"] == 1
+    assert counts["daily_notifications"] == 2
     assert await service.daily.get(local_date(start)) is None

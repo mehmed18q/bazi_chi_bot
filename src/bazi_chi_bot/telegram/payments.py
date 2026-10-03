@@ -16,6 +16,7 @@ from aiogram.types import CallbackQuery, Message, TelegramObject
 
 from ..game import GameService
 from ..models import PaymentSettings, User
+from .access import is_free_event
 from .keyboards import (
     activation_keyboard,
     menu_keyboard,
@@ -40,7 +41,7 @@ class PaymentAdminSetup(StatesGroup):
 
 def payment_settings_text(settings: PaymentSettings) -> str:
     return (
-        "💳 <b>تنظیمات پرداخت و فعال‌سازی</b>\n\n"
+        "💳 <b>تنظیمات خرید اشتراک ویژه</b>\n\n"
         f"مبلغ پایه: <b>{settings.base_amount_toman:,} تومان</b>\n"
         f"شماره کارت: <code>{escape(settings.card_number)}</code>\n"
         f"به نام: <b>{escape(settings.card_holder)}</b>\n\n"
@@ -58,8 +59,10 @@ async def activation_gate_text(service: GameService, user: User) -> str:
         "\n\n⏳ <b>رسیدت ثبت شده و منتظر بررسی ادمین است.</b>" if pending is not None else ""
     )
     return (
-        "🔐 <b>فعال‌سازی بازی‌چی</b>\n\n"
-        "برای فعال‌شدن ربات، مبلغ اختصاصی زیر را دقیقاً واریز کن:\n\n"
+        "⭐ <b>اشتراک ویژهٔ بازی‌چی (بدون انقضا)</b>\n\n"
+        "بازی تک‌نفره، چالش روزانه و یادآور آن رایگان‌اند. با اشتراک ویژه، "
+        "بازی دونفره، تورنومنت و مسابقهٔ گروهی و امکانات دیگر باز می‌شوند.\n\n"
+        "برای خرید اشتراک ویژه، مبلغ اختصاصی زیر را دقیقاً واریز کن:\n\n"
         f"💰 مبلغ: <b>{amount:,} تومان</b>\n"
         f"💳 شماره کارت: <code>{escape(settings.card_number)}</code>\n"
         f"👤 به نام: <b>{escape(settings.card_holder)}</b>\n"
@@ -82,13 +85,13 @@ async def show_activation_gate(event: Message | CallbackQuery, service: GameServ
     text = await activation_gate_text(service, user)
     if isinstance(event, CallbackQuery):
         await safe_edit(event, text, activation_keyboard())
-        await event.answer("ابتدا پرداخت و فعال‌سازی را کامل کن.", show_alert=True)
+        await event.answer("این بخش به اشتراک ویژه نیاز دارد.", show_alert=True)
     else:
         await event.answer(text, reply_markup=activation_keyboard())
 
 
 class PaymentAccessMiddleware(BaseMiddleware):
-    """Allow only activation traffic until an administrator approves payment."""
+    """Permit free play and require an approved purchase for premium routes."""
 
     def __init__(self, service: GameService, admin_ids: frozenset[int]) -> None:
         self.service = service
@@ -104,9 +107,7 @@ class PaymentAccessMiddleware(BaseMiddleware):
             return await handler(event, data)
         if event.from_user.id in self.admin_ids:
             return await handler(event, data)
-        if isinstance(event, Message) and event.text and event.text.startswith("/start"):
-            return await handler(event, data)
-        if isinstance(event, CallbackQuery) and (event.data or "").startswith("payment:"):
+        if await is_free_event(self.service, event):
             return await handler(event, data)
 
         state = data.get("state")
@@ -130,12 +131,30 @@ def register_handlers(
     def is_admin(user_id: int) -> bool:
         return user_id in admin_ids
 
+    @router.callback_query(F.data == "menu:premium")
+    async def premium_menu(callback: CallbackQuery) -> None:
+        await service.save_user(telegram_user(callback.from_user))
+        user = await service.get_user(callback.from_user.id)
+        if user is None:
+            return
+        if user.is_activated or is_admin(user.telegram_id):
+            await safe_edit(
+                callback,
+                "⭐ <b>اشتراک ویژهٔ تو فعال است و تاریخ انقضا ندارد.</b>\n\n"
+                "بازی دونفره، تورنومنت، گروه و سایر امکانات در دسترس تو هستند.",
+                menu_keyboard(),
+            )
+            await callback.answer()
+            return
+        await safe_edit(callback, await activation_gate_text(service, user), activation_keyboard())
+        await callback.answer()
+
     @router.callback_query(F.data == "payment:send")
     async def payment_receipt_start(callback: CallbackQuery, state: FSMContext) -> None:
         await service.save_user(telegram_user(callback.from_user))
         user = await service.get_user(callback.from_user.id)
         if user is not None and user.is_activated:
-            await callback.answer("حساب تو قبلاً فعال شده است. ✅", show_alert=True)
+            await callback.answer("اشتراک ویژهٔ تو قبلاً فعال شده است. ✅", show_alert=True)
             return
         await state.set_state(PaymentSetup.waiting_for_receipt)
         await callback.message.answer(
@@ -166,7 +185,7 @@ def register_handlers(
             if "already activated" in str(error):
                 await state.clear()
                 await message.answer(
-                    "✅ حساب تو قبلاً فعال شده است.",
+                    "✅ اشتراک ویژهٔ تو قبلاً فعال شده است.",
                     reply_markup=menu_keyboard(),
                 )
             else:
@@ -182,7 +201,7 @@ def register_handlers(
             f"\n\n📝 متن رسید:\n{escape(receipt.receipt_text)}" if receipt.receipt_text else ""
         )
         admin_text = (
-            f"💳 <b>رسید فعال‌سازی #{receipt.id}</b>\n\n"
+            f"💳 <b>رسید اشتراک ویژه #{receipt.id}</b>\n\n"
             f"نام در ربات: <b>{escape(user.display_name)}</b>\n"
             f"نام تلگرام: <b>{escape(telegram_name)}</b>\n"
             f"یوزرنیم: <code>{escape(username)}</code>\n"
@@ -255,7 +274,7 @@ def register_handlers(
             await safe_send(
                 bot,
                 receipt.user_telegram_id,
-                "🎉 <b>پرداختت تأیید شد و ربات فعال شد.</b>\n\nحالا می‌تونی بازی کنی! 🎮"
+                "🎉 <b>پرداختت تأیید شد؛ اشتراک ویژهٔ بدون انقضا فعال شد.</b>\n\nحالا می‌تونی همهٔ بازی‌ها را تجربه کنی! 🎮"
                 f"{pending_invite_note}\n\n{profile_name_text(user)}",
                 profile_name_keyboard(user.nickname_is_custom),
             )

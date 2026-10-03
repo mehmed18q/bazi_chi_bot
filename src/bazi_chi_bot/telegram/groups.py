@@ -241,7 +241,7 @@ def build_group_router(
     async def allowed(callback: CallbackQuery, bot: Bot) -> bool:
         account = await service.get_user(callback.from_user.id)
         if account is None or (not account.is_activated and account.telegram_id not in admin_ids):
-            await callback.answer("اول ربات را در خصوصی باز کن و حسابت را فعال کن.", show_alert=True)
+            await callback.answer("برای مسابقهٔ گروهی به اشتراک ویژه نیاز داری؛ ربات را در خصوصی باز کن.", show_alert=True)
             return False
         sponsors = await service.active_sponsors()
         if sponsors:
@@ -275,6 +275,10 @@ def build_group_router(
     async def group_play(message: Message) -> None:
         if message.from_user is None or message.from_user.is_bot:
             return
+        account = await service.get_user(message.from_user.id)
+        if message.from_user.id not in admin_ids and (account is None or not account.is_activated):
+            await message.answer("⭐ مسابقهٔ گروهی ویژهٔ مشترکان است. برای خرید، ربات را در خصوصی باز کن.")
+            return
         existing = await service.group_games.active_in_chat(message.chat.id)
         if existing:
             await message.answer(
@@ -301,8 +305,8 @@ def build_group_router(
             await message.answer("این مسابقه در این گروه نیست.")
             return
         account = await service.get_user(message.from_user.id)
-        if account is None or not account.is_activated:
-            await message.answer("اول حسابت را در خصوصی ربات فعال کن.")
+        if message.from_user.id not in admin_ids and (account is None or not account.is_activated):
+            await message.answer("برای مسابقهٔ گروهی به اشتراک ویژه نیاز داری.")
             return
         try:
             session, feedback = await service.group_games.text_input(
@@ -320,6 +324,10 @@ def build_group_router(
             return
         text = message.text or message.caption or ""
         if text.startswith("/") or not mentions_bot_name(text):
+            return
+        account = await service.get_user(message.from_user.id)
+        if message.from_user.id not in admin_ids and (account is None or not account.is_activated):
+            await message.answer("👋 من اینجام! مسابقهٔ گروهی با اشتراک ویژه باز می‌شود؛ در خصوصی ربات اشتراکت را فعال کن. ⭐")
             return
         existing = await service.group_games.active_in_chat(message.chat.id)
         if existing:

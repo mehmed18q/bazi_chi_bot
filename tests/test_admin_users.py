@@ -89,7 +89,7 @@ async def test_admin_can_activate_and_deactivate_user_from_profile(service, play
         for button in row
     }
     assert f"admin_user:activation:{target.telegram_id}:off" in callbacks
-    assert "حساب تو توسط ادمین فعال شد" in bot.send_message.call_args.args[1]
+    assert "اشتراک ویژهٔ بدون انقضای تو توسط ادمین فعال شد" in bot.send_message.call_args.args[1]
     assert "نام نمایشی تو" in bot.send_message.call_args.args[1]
 
     callback.data = f"admin_user:activation:{target.telegram_id}:off"
@@ -100,5 +100,5 @@ async def test_admin_can_activate_and_deactivate_user_from_profile(service, play
     deactivated = await service.get_user(target.telegram_id)
     assert deactivated is not None and not deactivated.is_activated
     assert deactivated.activation_approved_at is None
-    assert "غیرفعال 🔒" in message.edit_text.call_args.args[0]
+    assert "ندارد 🔒" in message.edit_text.call_args.args[0]
     assert "غیرفعال شد" in bot.send_message.call_args.args[1]

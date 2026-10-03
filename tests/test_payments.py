@@ -5,12 +5,12 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 from aiogram.enums import ChatType
-from aiogram.types import Chat, Message
+from aiogram.types import CallbackQuery, Chat, Message
 from aiogram.types import User as TelegramUser
 
 from bazi_chi_bot.game import GameService
 from bazi_chi_bot.handlers import build_router
-from bazi_chi_bot.models import PaymentReceiptStatus, User
+from bazi_chi_bot.models import GameType, PaymentReceiptStatus, User
 from bazi_chi_bot.telegram.keyboards import admin_menu_keyboard
 from bazi_chi_bot.telegram.payments import PaymentAccessMiddleware, activation_gate_text
 
@@ -79,7 +79,7 @@ async def test_receipts_are_persisted_and_only_one_review_activates_user(
         await service.submit_payment_receipt(first.telegram_id, receipt_text="تکراری")
 
 
-async def test_start_shows_games_then_exact_activation_amount(service, players):
+async def test_start_opens_free_games_without_payment(service, players):
     first = players[0]
     router = build_router(service)
     handler = next(
@@ -101,9 +101,16 @@ async def test_start_shows_games_then_exact_activation_amount(service, players):
 
     await handler(message, SimpleNamespace(args=None), bot, state)
 
-    assert message.answer.await_count == 2
+    assert message.answer.await_count == 1
     assert "شش بازی" in message.answer.await_args_list[0].args[0]
-    payment_text = message.answer.await_args_list[1].args[0]
+    callbacks = {
+        button.callback_data
+        for row in message.answer.await_args.kwargs["reply_markup"].inline_keyboard
+        for button in row
+    }
+    assert {"menu:new", "menu:daily_challenge", "menu:premium"} <= callbacks
+
+    payment_text = await activation_gate_text(service, await service.get_user(first.telegram_id))
     assert "100,001 تومان" in payment_text
     assert "6219861814466156" in payment_text
     assert "محمد صادق کیومرثی" in payment_text
@@ -215,7 +222,7 @@ async def test_text_receipt_is_forwarded_to_reviewer_and_approval_notifies_user(
     assert activated is not None and activated.is_activated
     activation_message = bot.send_message.await_args_list[0]
     assert activation_message.args[0] == first.telegram_id
-    assert "ربات فعال شد" in activation_message.args[1]
+    assert "اشتراک ویژهٔ بدون انقضا فعال شد" in activation_message.args[1]
     assert "نام نمایشی تو" in activation_message.args[1]
     activation_callbacks = {
         button.callback_data
@@ -259,3 +266,41 @@ async def test_payment_middleware_blocks_until_receipt_is_approved(service, play
     await service.review_payment_receipt(receipt.id, 1767552952, True)
     assert await middleware(handler, message, {}) == "handled"
     handler.assert_awaited_once()
+
+
+async def test_free_callbacks_and_solo_game_work_before_purchase(service, players):
+    user = players[0]
+    middleware = PaymentAccessMiddleware(service, frozenset())
+    handler = AsyncMock(return_value="handled")
+    telegram_user = TelegramUser(id=user.telegram_id, is_bot=False, first_name=user.first_name)
+    chat_message = Message(
+        message_id=1,
+        date=datetime.now(timezone.utc),
+        chat=Chat(id=user.telegram_id, type=ChatType.PRIVATE),
+        from_user=telegram_user,
+        text="بازی",
+    )
+
+    def callback(data: str) -> CallbackQuery:
+        return CallbackQuery(
+            id="callback", from_user=telegram_user, chat_instance="test",
+            message=chat_message, data=data,
+        )
+
+    for data in ("menu:home", "menu:new", "setup:solo", "setup:solo:type:word",
+                 "menu:daily_challenge", "daily:play", "daily:reminder:on", "menu:premium"):
+        assert await middleware(handler, callback(data), {}) == "handled"
+
+    solo = (await service.create_solo_game(user.telegram_id, 2, 3, GameType.WORD_GUESS)).game
+    assert await middleware(handler, callback(f"game:{solo.id}:{solo.version}:guess:1"), {}) == "handled"
+    assert await middleware(handler, chat_message, {}) == "handled"
+
+    premium = await service.create_game(user.telegram_id, 2, 3)
+    with patch("bazi_chi_bot.telegram.payments.show_activation_gate", new_callable=AsyncMock) as gate:
+        for data in ("menu:tournament", "tour:mode:s", "setup:type:word",
+                     f"game:{premium.id}:{premium.version}:hide:1"):
+            assert await middleware(handler, callback(data), {}) is None
+        assert gate.await_count == 4
+
+    await service.set_user_activation(user.telegram_id, 999, True)
+    assert await middleware(handler, callback("tour:mode:s"), {}) == "handled"

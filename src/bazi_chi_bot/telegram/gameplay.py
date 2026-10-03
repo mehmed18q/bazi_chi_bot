@@ -84,6 +84,8 @@ GAME_SETUP: dict[GameType, tuple[str, str, int]] = {
 def register_handlers(
     router: Router,
     service: GameService,
+    *,
+    admin_ids: frozenset[int] = frozenset(),
 ) -> None:
     presenter = GamePresenter(service)
     send_game_view = presenter.send_game_view
@@ -120,6 +122,17 @@ def register_handlers(
     @router.callback_query(F.data == "menu:new")
     async def new_game(callback: CallbackQuery) -> None:
         await service.save_user(telegram_user(callback.from_user))
+        user = await service.get_user(callback.from_user.id)
+        if user is not None and not user.is_activated and callback.from_user.id not in admin_ids:
+            await safe_edit(
+                callback,
+                "🤖 <b>بازی‌های رایگان با ربات</b>\n\n"
+                "یکی از پنج بازی را انتخاب کن. برای بازی دونفره، تورنومنت و گروه "
+                "می‌توانی اشتراک ویژه بگیری.",
+                game_types_keyboard(solo=True),
+            )
+            await callback.answer()
+            return
         await safe_edit(
             callback,
             "🎮 <b>کدام بازی را شروع می‌کنیم؟</b>\n\n"

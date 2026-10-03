@@ -17,6 +17,21 @@ from bazi_chi_bot.telegram.groups import (
 from bazi_chi_bot.telegram.router import build_router
 
 
+async def test_free_member_cannot_create_group_game(service, players):
+    router = build_group_router(service)
+    handler = next(
+        item.callback for item in router.callback_query.handlers
+        if item.callback.__name__ == "group_new"
+    )
+    callback = SimpleNamespace(
+        from_user=TelegramUser(id=players[0].telegram_id, is_bot=False, first_name="صادق"),
+        message=SimpleNamespace(chat=SimpleNamespace(id=-10011)),
+        answer=AsyncMock(),
+    )
+    await handler(callback, SimpleNamespace())
+    assert "اشتراک ویژه" in callback.answer.call_args.args[0]
+
+
 async def _players(service, players):
     third = User(303, "third", "سوم", None, "سوم")
     await service.save_user(third)
@@ -225,6 +240,7 @@ def test_group_menu_offers_all_six_games():
 
 
 async def test_group_message_mention_invites_members_to_start(service, players):
+    await service.set_user_activation(players[0].telegram_id, 999, True)
     handler = next(
         item.callback for item in build_group_router(service).message.handlers
         if item.callback.__name__ == "group_name"

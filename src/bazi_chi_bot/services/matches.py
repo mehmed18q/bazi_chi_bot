@@ -248,15 +248,12 @@ class MatchService:
                     or bool(challenge["bot_starts"]) != bot_starts
                 ):
                     raise InvalidGameSetup
-                activated = await (
+                registered = await (
                     await connection.execute(
-                        "SELECT is_activated FROM users WHERE telegram_id = ?", (creator_id,)
+                        "SELECT 1 FROM users WHERE telegram_id = ?", (creator_id,)
                     )
                 ).fetchone()
-                if activated is None or (
-                    not activated["is_activated"]
-                    and creator_id not in self.activation_exempt_ids
-                ):
+                if registered is None:
                     raise DailyChallengeRequiresActivation
                 existing = await (
                     await connection.execute(

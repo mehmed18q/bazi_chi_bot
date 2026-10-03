@@ -38,9 +38,9 @@ from ..rules import MASTERMIND_COLOR_EMOJIS, MASTERMIND_MAX_ATTEMPTS
 from ..ui import (
     FINAL_LABELS,
     game_keyboard,
+    mastermind_board,
     render_game,
     word_guess_board,
-    mastermind_board,
 )
 from .rendering import GAME_TEXT_PREVIEW_LENGTH
 
@@ -75,7 +75,7 @@ ERROR_MESSAGES: dict[type[GameError], str] = {
     NotAPlayer: "تو بازیکن این مسابقه نیستی. 🚫",
     NotYourTurn: "الان نوبت تو نیست؛ کمی صبر کن. ⏳",
     DailyChallengeClosed: "زمان چالش امروز تمام شده؛ فردا دوباره امتحان کن. ⏰",
-    DailyChallengeRequiresActivation: "برای شرکت در چالش روزانه باید هزینهٔ فعال‌سازی را پرداخت و حساب را فعال کنی. 🔒",
+    DailyChallengeRequiresActivation: "برای استفاده از چالش یا یادآور رایگان، ابتدا /start را بزن.",
     InvalidFist: "شمارهٔ مشت معتبر نیست. 🤔",
     InvalidCell: "این خانه پر است یا انتخابت معتبر نیست؛ یک خانهٔ خالی را بزن. ❌⭕",
     InvalidWord: "کلمه باید بدون فاصله، فقط شامل حروف و بین ۲ تا ۲۰ حرف باشد. 🔤",

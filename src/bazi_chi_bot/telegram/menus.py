@@ -35,7 +35,7 @@ from .keyboards import (
     sponsor_admin_keyboard,
     sponsor_kind_keyboard,
 )
-from .payments import activation_gate_text
+from .payments import activation_gate_text, show_activation_gate
 from .shared import (
     AdminMessageSetup,
     GamePresenter,
@@ -68,6 +68,21 @@ def register_handlers(
     def main_menu(user_id: int, has_active_games: bool = False):
         return menu_keyboard(has_active_games, is_countdown_admin(user_id))
 
+    async def has_premium(user_id: int) -> bool:
+        user = await service.get_user(user_id)
+        return is_countdown_admin(user_id) or bool(user and user.is_activated)
+
+    async def visible_games(user_id: int):
+        if await has_premium(user_id):
+            return await service.active_games(user_id)
+        games = await service.queries.active_games(user_id)
+        return [game for game in games if game.is_solo and game.tournament_id is None]
+
+    async def latest_visible_game(user_id: int):
+        return await service.queries.latest_finished_game(
+            user_id, solo_only=not await has_premium(user_id)
+        )
+
     def admin_profile_text(user, stats) -> str:
         username = f"@{user.username}" if user.username else "ندارد"
         telegram_name = user.telegram_display_name or user.display_name
@@ -78,7 +93,7 @@ def register_handlers(
             f"یوزرنیم: <code>{escape(username)}</code>\n"
             f"شناسهٔ داخلی: <code>{user.id if user.id is not None else '—'}</code>\n"
             f"شناسهٔ تلگرام: <code>{user.telegram_id}</code>\n"
-            f"وضعیت فعال‌سازی: <b>{'فعال ✅' if user.is_activated else 'غیرفعال 🔒'}</b>\n\n"
+            f"اشتراک ویژه: <b>{'فعال ✅' if user.is_activated else 'ندارد 🔒'}</b>\n\n"
             f"بازی‌ها: {stats.games_played}\nبرد: {stats.wins}\nامتیاز: {stats.points_won}"
         )
 
@@ -203,7 +218,7 @@ def register_handlers(
             await safe_send(
                 bot,
                 uid,
-                "✅ <b>حساب تو توسط ادمین فعال شد.</b>\n\nحالا می‌تونی بازی کنی! 🎮"
+                "⭐ <b>اشتراک ویژهٔ بدون انقضای تو توسط ادمین فعال شد.</b>\n\nحالا به همهٔ بازی‌ها دسترسی داری! 🎮"
                 f"{pending_invite_note}\n\n{profile_name_text(user)}",
                 profile_name_keyboard(user.nickname_is_custom),
             )
@@ -212,8 +227,9 @@ def register_handlers(
             await safe_send(
                 bot,
                 uid,
-                "🔒 <b>دسترسی تو به ربات توسط ادمین غیرفعال شد.</b>\n\n"
-                "برای فعال‌سازی دوباره، /start را بزن.",
+                "🔒 <b>اشتراک ویژهٔ تو توسط ادمین غیرفعال شد.</b>\n\n"
+                "بازی تک‌نفره، چالش روزانه و یادآور آن همچنان رایگان‌اند. "
+                "برای دیدن منو /start را بزن.",
                 activation_keyboard(),
             )
             await callback.answer("کاربر غیرفعال شد.")
@@ -378,16 +394,16 @@ def register_handlers(
         if invite_token and persisted_user is not None:
             await service.set_pending_invite(user.telegram_id, invite_token)
             persisted_user = await service.get_user(user.telegram_id)
-        if not admin and persisted_user is not None and not persisted_user.is_activated:
-            await message.answer(START_TEXT)
+        if not payload and persisted_user is not None and persisted_user.pending_invite_token:
+            payload = f"join_{persisted_user.pending_invite_token}"
+        if payload.startswith(("join_", "group_")) and not await has_premium(user.telegram_id):
+            await message.answer(START_TEXT, reply_markup=main_menu(user.telegram_id))
             await message.answer(
                 await activation_gate_text(service, persisted_user),
                 reply_markup=activation_keyboard(),
             )
             return
-        if not payload and persisted_user is not None and persisted_user.pending_invite_token:
-            payload = f"join_{persisted_user.pending_invite_token}"
-        if not admin:
+        if payload.startswith(("join_", "group_")) and not admin:
             sponsors = await service.active_sponsors()
             check = await check_sponsors(bot, user.telegram_id, sponsors)
             if not check.allowed:
@@ -439,7 +455,7 @@ def register_handlers(
                 )
                 return
 
-        games = await service.active_games(user.telegram_id)
+        games = await visible_games(user.telegram_id)
         recovery = (
             f"\n\n💾 <b>{len(games)} بازی ناتمام</b> داری؛ از «ادامهٔ بازی» وارد شو."
             if games
@@ -467,6 +483,9 @@ def register_handlers(
             return
 
         payload = (callback.data or "").removeprefix("sponsors:check:")
+        if payload.startswith("join_") and not await has_premium(callback.from_user.id):
+            await show_activation_gate(callback, service)
+            return
         if payload.startswith("join_"):
             user = telegram_user(callback.from_user)
             await service.save_user(user)
@@ -495,7 +514,7 @@ def register_handlers(
             await callback.answer("عضویت تأیید شد! 🎉")
             return
 
-        games = await service.active_games(callback.from_user.id)
+        games = await visible_games(callback.from_user.id)
         await safe_edit(
             callback,
             "✅ <b>عضویتت تأیید شد!</b>\n\nحالا می‌تونی بازی رو شروع کنی.",
@@ -566,7 +585,7 @@ def register_handlers(
     async def games_command(message: Message, bot: Bot) -> None:
         if message.from_user is None:
             return
-        games = await service.active_games(message.from_user.id)
+        games = await visible_games(message.from_user.id)
         if not games:
             await message.answer(
                 "فعلاً بازی ناتمامی نداری. یک بازی تازه شروع کن! 🎮",
@@ -581,7 +600,7 @@ def register_handlers(
     async def last_game_command(message: Message, bot: Bot) -> None:
         if message.from_user is None:
             return
-        game = await service.latest_finished_game(message.from_user.id)
+        game = await latest_visible_game(message.from_user.id)
         if game is None:
             await message.answer(
                 "هنوز نتیجه‌ای برای نمایش نداری. اولین بازی‌ات را شروع کن! 🎮",
@@ -597,7 +616,7 @@ def register_handlers(
     @router.callback_query(F.data == "menu:home")
     async def menu_home(callback: CallbackQuery, state: FSMContext) -> None:
         await state.clear()
-        games = await service.active_games(callback.from_user.id)
+        games = await visible_games(callback.from_user.id)
         await safe_edit(
             callback,
             START_TEXT,
@@ -611,7 +630,7 @@ def register_handlers(
 
     @router.callback_query(F.data == "menu:last")
     async def menu_last_game(callback: CallbackQuery, bot: Bot) -> None:
-        game = await service.latest_finished_game(callback.from_user.id)
+        game = await latest_visible_game(callback.from_user.id)
         if game is None:
             await safe_edit(
                 callback,
@@ -753,7 +772,7 @@ def register_handlers(
 
     @router.callback_query(F.data == "menu:resume")
     async def resume_games(callback: CallbackQuery, bot: Bot) -> None:
-        games = await service.active_games(callback.from_user.id)
+        games = await visible_games(callback.from_user.id)
         if not games:
             await safe_edit(
                 callback,

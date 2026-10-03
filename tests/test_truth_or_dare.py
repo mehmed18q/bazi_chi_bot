@@ -120,6 +120,7 @@ async def test_text_reply_selects_the_right_game_when_multiple_answers_are_pendi
     service, players
 ):
     first, second = players
+    await service.set_user_activation(first.telegram_id, 999, True)
     await service.add_question("truth", "یک سؤال جایگزین.")
 
     final_game = await service.create_game(first.telegram_id, 2, 3)

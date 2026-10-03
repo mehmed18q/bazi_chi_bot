@@ -31,6 +31,8 @@ from .shared import (
 def register_handlers(
     router: Router,
     service: GameService,
+    *,
+    admin_ids: frozenset[int] = frozenset(),
 ) -> None:
     presenter = GamePresenter(service)
     send_game_view = presenter.send_game_view
@@ -54,9 +56,17 @@ def register_handlers(
 
         user_id = message.from_user.id
         await service.save_user(telegram_user(message.from_user))
+        user = await service.get_user(user_id)
+        premium = user_id in admin_ids or bool(user and user.is_activated)
 
         destinations: list[tuple[str, Game]] = []
-        for game in await service.active_games(user_id):
+        games = (
+            await service.active_games(user_id)
+            if premium else await service.queries.active_games(user_id)
+        )
+        for game in games:
+            if not premium and (not game.is_solo or game.tournament_id is not None):
+                continue
             if (
                 game.status is GameStatus.FINISHED
                 and game.loser_id == user_id

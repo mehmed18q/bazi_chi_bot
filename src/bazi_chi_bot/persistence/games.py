@@ -64,16 +64,17 @@ class GameRepository:
             ).fetchall()
         return [_game_from_row(row) for row in rows]
 
-    async def latest_finished_game(self, user_id: int) -> Game | None:
+    async def latest_finished_game(self, user_id: int, *, solo_only: bool = False) -> Game | None:
         async with self.database.connect() as connection:
             row = await (
                 await connection.execute(
                     """
                     SELECT * FROM games
                     WHERE (creator_id = ? OR player2_id = ?) AND status = 'finished'
+                      AND (? = 0 OR (player2_id = -1 AND tournament_id IS NULL))
                     ORDER BY updated_at DESC, id DESC LIMIT 1
                     """,
-                    (user_id, user_id),
+                    (user_id, user_id, int(solo_only)),
                 )
             ).fetchone()
         return _game_from_row(row) if row else None
