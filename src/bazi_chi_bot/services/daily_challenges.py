@@ -13,8 +13,8 @@ from ..errors import DailyChallengeClosed
 from ..models import DailyChallenge, Game, GameType
 from ..persistence.mappers import _game_from_row
 from ..rules import ALLOWED_HAND_COUNTS, MASTERMIND_COLORS
+from ..word_bank import BOT_WORDS
 from .matches import MatchService
-from .solo import BOT_WORDS
 
 DAILY_TYPES = (
     GameType.GOL_YA_POOCH,
@@ -256,17 +256,28 @@ class DailyChallengeService:
         else:
             result = "⌛ در چالش امروز شرکت نکردی و امتیازش را از دست دادی. فردا دوباره بیا!"
         detail = ""
-        if challenge.secrets:
+        if challenge.game_type is GameType.WORD_GUESS:
+            async with self.database.connect() as connection:
+                words = await (
+                    await connection.execute(
+                        """SELECT a.hand_number, a.word FROM bot_word_assignments a
+                           JOIN games g ON g.id = a.game_id
+                           WHERE g.daily_challenge_date = ? AND a.user_id = ?
+                           ORDER BY a.hand_number""",
+                        (challenge.challenge_date, user_id),
+                    )
+                ).fetchall()
+            if words:
+                detail = "\n🔐 کلمه‌های مخفی ربات برای تو: " + "، ".join(
+                    f"دور {row['hand_number']}: <b>{row['word']}</b>" for row in words
+                )
+        elif challenge.secrets:
             first_bot_hand = 0 if challenge.bot_starts else 1
             bot_hands = [
                 (index + 1, challenge.secrets[index])
                 for index in range(first_bot_hand, len(challenge.secrets), 2)
             ]
-            if challenge.game_type is GameType.WORD_GUESS:
-                detail = "\n🔐 کلمه‌های مخفی ربات: " + "، ".join(
-                    f"دور {number}: <b>{secret}</b>" for number, secret in bot_hands
-                )
-            elif challenge.game_type is GameType.MASTERMIND:
+            if challenge.game_type is GameType.MASTERMIND:
                 from ..rules import MASTERMIND_COLOR_EMOJIS
 
                 detail = "\n🎨 کدهای مخفی ربات: " + "، ".join(

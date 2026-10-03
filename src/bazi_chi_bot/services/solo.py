@@ -12,33 +12,10 @@ from functools import cache
 from ..models import Game, GamePhase, GameStatus, GameType, MastermindGuess, WordGuess
 from ..persistence.games import GameRepository
 from ..rules import MASTERMIND_COLORS, evaluate_mastermind_guess, evaluate_word_guess
+from ..word_bank import BOT_WORDS
 from .matches import BOT_USER_ID, MatchService
 from .prediction import predict_choice
 
-BOT_WORDS = (
-    "آب",
-    "گل",
-    "ماه",
-    "نان",
-    "سیب",
-    "کتاب",
-    "باران",
-    "مداد",
-    "خانه",
-    "پرنده",
-    "دریا",
-    "پنجره",
-    "دوچرخه",
-    "آسمان",
-    "خورشید",
-    "کوهستان",
-    "مهربانی",
-    "کتابخانه",
-    "ستاره",
-    "باغچه",
-    "خوشحالی",
-    "دوستی",
-)
 WORD_LETTERS = "ابپتجچخدرزسشفغقکگلمناوی"
 
 
@@ -224,12 +201,9 @@ class SoloOpponent:
             elif game.game_type is GameType.WORD_GUESS:
                 if game.phase is GamePhase.HIDING and game.hider_id == BOT_USER_ID:
                     daily_secret = await self._daily_secret(game)
-                    await self.matches.choose_word(
+                    await self.matches.choose_bot_word(
                         game.id,
-                        BOT_USER_ID,
-                        str(daily_secret)
-                        if daily_secret is not None
-                        else secrets.choice(BOT_WORDS),
+                        str(daily_secret) if daily_secret is not None else None,
                     )
                     messages.append("🤖 ربات کلمه را انتخاب کرد؛ نوبت حدس توست.")
                 elif game.phase is GamePhase.GUESSING and game.guesser_id == BOT_USER_ID:

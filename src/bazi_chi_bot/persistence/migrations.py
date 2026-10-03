@@ -1031,4 +1031,75 @@ MIGRATIONS: tuple[str, ...] = (
     ) WHERE id IS NULL;
     DROP TABLE group_migration_missing_ids;
     """,
+    """
+    CREATE TABLE human_word_submissions (
+        word TEXT NOT NULL,
+        user_id INTEGER NOT NULL REFERENCES users(telegram_id),
+        created_at INTEGER NOT NULL,
+        PRIMARY KEY (word, user_id)
+    );
+    CREATE INDEX idx_human_word_submissions_user
+        ON human_word_submissions(user_id, word);
+
+    CREATE TABLE bot_word_assignments (
+        game_id INTEGER NOT NULL REFERENCES games(id) ON DELETE CASCADE,
+        hand_number INTEGER NOT NULL CHECK (hand_number >= 1),
+        user_id INTEGER NOT NULL REFERENCES users(telegram_id),
+        word TEXT NOT NULL,
+        assigned_at INTEGER NOT NULL,
+        PRIMARY KEY (game_id, hand_number),
+        UNIQUE (user_id, word)
+    );
+    CREATE INDEX idx_bot_word_assignments_user
+        ON bot_word_assignments(user_id, assigned_at);
+
+    -- Historical games retain the latest secret; backfill what is still available.
+    INSERT OR IGNORE INTO human_word_submissions (word, user_id, created_at)
+        SELECT word_secret, hider_id, updated_at FROM games
+        WHERE game_type = 'word_guess' AND word_secret IS NOT NULL
+            AND hider_id IS NOT NULL AND hider_id != -1;
+    INSERT OR IGNORE INTO human_word_submissions (word, user_id, created_at)
+        WITH numbered_players AS (
+            SELECT session_id, user_id,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY session_id ORDER BY joined_at, rowid
+                   ) - 1 AS turn_index,
+                   COUNT(*) OVER (PARTITION BY session_id) AS player_count
+            FROM group_players
+        )
+        SELECT s.secret_choice, p.user_id, s.created_at
+        FROM group_sessions s
+        JOIN numbered_players p ON p.session_id = s.id
+            AND p.turn_index = (s.current_round - 1) % p.player_count
+        WHERE s.game_type = 'word_guess' AND s.secret_choice IS NOT NULL;
+    INSERT OR IGNORE INTO bot_word_assignments
+        (game_id, hand_number, user_id, word, assigned_at)
+        SELECT id, hand_number, creator_id, word_secret, updated_at FROM games
+        WHERE game_type = 'word_guess' AND is_solo = 1
+            AND hider_id = -1 AND word_secret IS NOT NULL;
+
+    -- Preserve aggregate-only balances/users inserted after the prior schema.
+    INSERT INTO score_events (user_id, reason, amount, created_at)
+        SELECT telegram_id, 'legacy', points_won, unixepoch() FROM user_stats
+        WHERE points_won > 0 AND NOT EXISTS (
+            SELECT 1 FROM score_events s WHERE s.user_id = user_stats.telegram_id
+        );
+    UPDATE user_stats SET points_won = (
+        SELECT COALESCE(SUM(amount), 0) FROM score_events s
+        WHERE s.user_id = user_stats.telegram_id
+    );
+    CREATE TEMP TABLE word_migration_missing_ids (
+        user_rowid INTEGER PRIMARY KEY, new_id INTEGER NOT NULL
+    );
+    INSERT INTO word_migration_missing_ids (user_rowid, new_id)
+        SELECT rowid,
+               (SELECT COALESCE(MAX(id), 0) FROM users)
+                   + ROW_NUMBER() OVER (ORDER BY rowid)
+        FROM users WHERE id IS NULL;
+    UPDATE users SET id = (
+        SELECT new_id FROM word_migration_missing_ids
+        WHERE user_rowid = users.rowid
+    ) WHERE id IS NULL;
+    DROP TABLE word_migration_missing_ids;
+    """,
 )

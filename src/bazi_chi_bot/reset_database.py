@@ -1,4 +1,4 @@
-"""Reset game history while preserving Telegram users and the question bank."""
+"""Reset game history while preserving users, questions, and submitted words."""
 
 from __future__ import annotations
 
@@ -20,7 +20,8 @@ async def reset_history(database: Database) -> dict[str, int]:
             "daily_notifications", "question_answers", "challenge_rounds",
             "choice_observations", "group_attempts", "group_round_moves",
             "group_players", "group_sessions",
-            "score_events", "games", "tournaments", "countdowns", "daily_challenges",
+            "bot_word_assignments", "score_events", "games", "tournaments",
+            "countdowns", "daily_challenges",
         )
         for table in history_tables:
             row = await (await connection.execute(f"SELECT count(*) FROM {table}")).fetchone()

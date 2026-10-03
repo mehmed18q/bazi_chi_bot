@@ -17,6 +17,7 @@ from ..rules import (
     normalize_mastermind_code,
     normalize_word,
 )
+from .word_bank import record_player_word
 
 GROUP_TYPES = tuple(GameType)
 RPS_CHOICES = ("rock", "paper", "scissors")
@@ -416,6 +417,8 @@ class GroupGameService:
                     "UPDATE group_sessions SET secret_choice = ?, phase = 'guess' WHERE id = ?",
                     (value, session_id),
                 )
+                if kind == "word":
+                    await record_player_word(connection, user_id, value)
                 return await self._load(connection, session_id), "راز ثبت شد؛ بقیه می‌توانند حدس بزنند."
             if session.phase != "guess" or user_id == session.role_id:
                 raise GroupSessionError("turn")

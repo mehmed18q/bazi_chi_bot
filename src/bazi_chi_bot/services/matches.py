@@ -53,6 +53,7 @@ from ..rules import (
     play_tic_tac_toe,
 )
 from .prediction import RPS_CHOICES, choose_rps_response, record_choice
+from .word_bank import choose_unused_bot_word, record_player_word
 
 BOT_USER_ID = -1
 
@@ -545,7 +546,49 @@ class MatchService:
                 point_winner_id, True,
             )
 
+    async def _set_word(
+        self, connection: aiosqlite.Connection, game: Game, word: str
+    ) -> Game:
+        now = int(time.time())
+        cursor = await connection.execute(
+            """
+            UPDATE games SET word_secret = ?, word_attempts = 0,
+                word_guesses_json = '[]', phase = 'guessing',
+                version = version + 1, updated_at = ?
+            WHERE id = ? AND version = ? AND phase = 'hiding'
+            """,
+            (word, now, game.id, game.version),
+        )
+        if cursor.rowcount != 1:
+            raise StaleAction
+        return await _locked_game(connection, game.id)
+
+    async def choose_bot_word(self, game_id: int, preferred: str | None = None) -> Game:
+        """Reserve a fresh word and reveal its length in one transaction."""
+        async with self.database.transaction() as connection:
+            game = await _locked_game(connection, game_id)
+            if (
+                not game.is_solo
+                or game.game_type is not GameType.WORD_GUESS
+                or game.status is not GameStatus.ACTIVE
+                or game.phase is not GamePhase.HIDING
+                or game.hider_id != BOT_USER_ID
+                or game.word_secret is not None
+            ):
+                raise NotYourTurn
+            word = await choose_unused_bot_word(connection, game.creator_id, preferred)
+            updated = await self._set_word(connection, game, word)
+            await connection.execute(
+                """INSERT INTO bot_word_assignments
+                   (game_id, hand_number, user_id, word, assigned_at)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (game.id, game.hand_number, game.creator_id, word, int(time.time())),
+            )
+            return updated
+
     async def choose_word(self, game_id: int, user_id: int, text: str) -> Game:
+        if user_id == BOT_USER_ID:
+            return await self.choose_bot_word(game_id, text)
         word = normalize_word(text)
         async with self.database.transaction() as connection:
             game = await _locked_game(connection, game_id)
@@ -558,19 +601,10 @@ class MatchService:
                 or game.word_secret is not None
             ):
                 raise NotYourTurn
-            now = int(time.time())
-            cursor = await connection.execute(
-                """
-                UPDATE games SET word_secret = ?, word_attempts = 0,
-                    word_guesses_json = '[]', phase = 'guessing',
-                    version = version + 1, updated_at = ?
-                WHERE id = ? AND version = ? AND phase = 'hiding'
-                """,
-                (word, now, game.id, game.version),
-            )
-            if cursor.rowcount != 1:
-                raise StaleAction
-            return await _locked_game(connection, game.id)
+            updated = await self._set_word(connection, game, word)
+            if user_id != BOT_USER_ID:
+                await record_player_word(connection, user_id, word)
+            return updated
 
     async def guess_word(self, game_id: int, user_id: int, text: str) -> WordGuessResult:
         async with self.database.transaction() as connection:
