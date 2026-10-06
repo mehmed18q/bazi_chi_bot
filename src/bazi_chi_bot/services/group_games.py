@@ -55,6 +55,9 @@ class GroupSession:
     last_result: str | None
     players: tuple[GroupPlayer, ...]
     submitted_count: int
+    final_challenge_enabled: bool
+    final_target_id: int | None
+    final_approved: bool | None
 
     @property
     def role_id(self) -> int:
@@ -104,6 +107,11 @@ class GroupGameService:
             status=row["status"], last_result=row["last_result"],
             players=tuple(GroupPlayer(**dict(item)) for item in player_rows),
             submitted_count=count[0],
+            final_challenge_enabled=bool(row["final_challenge_enabled"]),
+            final_target_id=row["final_target_id"],
+            final_approved=(
+                bool(row["final_approved"]) if row["final_approved"] is not None else None
+            ),
         )
 
     async def get(self, session_id: int) -> GroupSession:
@@ -122,18 +130,22 @@ class GroupGameService:
 
     async def create(
         self, chat_id: int, message_id: int, creator_id: int,
-        display_name: str, game_type: GameType,
+        display_name: str, game_type: GameType, *, final_challenge_enabled: bool = False,
     ) -> GroupSession:
         if game_type not in GROUP_TYPES:
+            raise GroupSessionError("setup")
+        if game_type is GameType.TRUTH_OR_DARE and final_challenge_enabled:
             raise GroupSessionError("setup")
         now = int(time.time())
         async with self.database.transaction() as connection:
             try:
                 cursor = await connection.execute(
                     """INSERT INTO group_sessions
-                       (chat_id, message_id, creator_id, game_type, created_at)
-                       VALUES (?, ?, ?, ?, ?)""",
-                    (chat_id, message_id, creator_id, game_type.value, now),
+                       (chat_id, message_id, creator_id, game_type, created_at,
+                        final_challenge_enabled)
+                       VALUES (?, ?, ?, ?, ?, ?)""",
+                    (chat_id, message_id, creator_id, game_type.value, now,
+                     int(final_challenge_enabled)),
                 )
             except aiosqlite.IntegrityError as error:
                 raise GroupSessionError("open") from error
@@ -204,15 +216,29 @@ class GroupGameService:
         self, connection: aiosqlite.Connection, session: GroupSession, result: str
     ) -> GroupSession:
         finished = session.current_round >= session.total_rounds
+        final_target_id = None
+        if finished and session.final_challenge_enabled:
+            # The last row uses the same score and join-order ranking as the group card.
+            players = await (
+                await connection.execute(
+                    """SELECT user_id FROM group_players WHERE session_id = ?
+                       ORDER BY score DESC, joined_at ASC, user_id ASC""",
+                    (session.id,),
+                )
+            ).fetchall()
+            final_target_id = players[-1]["user_id"]
+        final_challenge = final_target_id is not None
         await connection.execute(
             """UPDATE group_sessions SET current_round = ?, status = ?, phase = ?,
                board = '.........', secret_choice = NULL, prompt_text = NULL,
-               answer_text = NULL, last_result = ? WHERE id = ?""",
+               answer_text = NULL, last_result = ?, final_target_id = ? WHERE id = ?""",
             (
                 session.current_round if finished else session.current_round + 1,
-                "finished" if finished else "active",
+                "active" if final_challenge or not finished else "finished",
+                "final_choice" if final_challenge else
                 "finished" if finished else self._initial_phase(session.game_type),
                 result,
+                final_target_id,
                 session.id,
             ),
         )
@@ -241,6 +267,45 @@ class GroupGameService:
                 raise GroupSessionError("stale")
             if all(player.user_id != user_id for player in session.players):
                 raise GroupSessionError("member")
+
+            if session.phase == "final_choice":
+                if user_id != session.final_target_id or choice not in ("truth", "dare"):
+                    raise GroupSessionError("turn")
+                question = await (
+                    await connection.execute(
+                        """SELECT text FROM questions WHERE active = 1 AND kind = ?
+                           AND length(text) <= 1500 ORDER BY RANDOM() LIMIT 1""",
+                        (choice,),
+                    )
+                ).fetchone()
+                prompt = question["text"] if question else (
+                    "یک حقیقت دربارهٔ خودت بگو." if choice == "truth"
+                    else "یک کار خلاقانه برای گروه انجام بده."
+                )
+                await connection.execute(
+                    """UPDATE group_sessions SET phase = 'final_response',
+                       secret_choice = ?, prompt_text = ? WHERE id = ?""",
+                    (choice, prompt, session_id),
+                )
+                return await self._load(connection, session_id)
+
+            if session.phase == "final_review":
+                if user_id == session.final_target_id or choice not in ("yes", "no"):
+                    raise GroupSessionError("turn")
+                await self._record_move(connection, session, user_id, choice)
+                session = await self._load(connection, session_id)
+                if session.submitted_count < len(session.players) - 1:
+                    return session
+                rows = await self._round_moves(connection, session)
+                approved = sum(row["choice"] == "yes" for row in rows) > len(rows) / 2
+                if approved:
+                    await self._award(connection, session_id, [session.final_target_id])
+                await connection.execute(
+                    """UPDATE group_sessions SET status = 'finished', phase = 'finished',
+                       final_approved = ? WHERE id = ?""",
+                    (int(approved), session_id),
+                )
+                return await self._load(connection, session_id)
 
             if session.game_type is GameType.TIC_TAC_TOE:
                 if session.phase != "board" or user_id != session.turn_id:
@@ -381,6 +446,21 @@ class GroupGameService:
             if session.status != "active" or all(p.user_id != user_id for p in session.players):
                 raise GroupSessionError("member")
             if kind == "answer":
+                if session.phase == "final_response":
+                    if user_id != session.final_target_id:
+                        raise GroupSessionError("turn")
+                    answer = text.strip()
+                    if not 1 <= len(answer) <= 1000:
+                        raise GroupSessionError("answer")
+                    await connection.execute(
+                        """UPDATE group_sessions SET answer_text = ?, phase = 'final_review'
+                           WHERE id = ?""",
+                        (answer, session_id),
+                    )
+                    return (
+                        await self._load(connection, session_id),
+                        "پاسخ چالش پایانی ثبت شد؛ منتظر رأی گروه باش.",
+                    )
                 if (
                     session.game_type is not GameType.TRUTH_OR_DARE
                     or session.phase != "response" or user_id != session.role_id

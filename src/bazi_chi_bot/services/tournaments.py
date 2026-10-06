@@ -12,7 +12,7 @@ from ..db import Database
 from ..errors import InvalidGameSetup, NotYourTurn
 from ..models import Game, GameStatus, GameType, Tournament
 from ..persistence.games import _locked_game
-from ..rules import MASTERMIND_MAX_ATTEMPTS
+from ..rules import ALLOWED_HAND_COUNTS, MASTERMIND_MAX_ATTEMPTS
 from .matches import BOT_USER_ID, MatchService
 from .prediction import choose_rps_response
 
@@ -29,12 +29,18 @@ GOL_FISTS = 3
 
 
 def _from_row(row: aiosqlite.Row) -> Tournament:
+    game_types = tuple(GameType(item) for item in json.loads(row["game_types_json"]))
     return Tournament(
         id=row["id"],
         creator_id=row["creator_id"],
         player2_id=row["player2_id"],
         is_solo=bool(row["is_solo"]),
-        game_types=tuple(GameType(item) for item in json.loads(row["game_types_json"])),
+        game_types=game_types,
+        hand_counts=(
+            tuple(json.loads(row["hand_counts_json"]))
+            if row["hand_counts_json"] is not None
+            else (STAGE_HANDS,) * len(game_types)
+        ),
         current_stage=row["current_stage"],
         current_game_id=row["current_game_id"],
         player1_score=row["player1_score"],
@@ -57,6 +63,7 @@ class TournamentService:
         creator_id: int,
         player2_id: int | None,
         is_solo: bool,
+        total_hands: int,
     ) -> Game:
         now = int(time.time())
         if is_solo:
@@ -108,7 +115,7 @@ class TournamentService:
                 creator_id,
                 player2_id,
                 fists,
-                STAGE_HANDS,
+                total_hands,
                 first,
                 first,
                 None if waiting else player2_id if first == creator_id else creator_id,
@@ -129,14 +136,17 @@ class TournamentService:
             ),
         )
         if is_solo and game_type is GameType.ROCK_PAPER_SCISSORS:
-            bot_move = await choose_rps_response(connection, creator_id, 1, STAGE_HANDS)
+            bot_move = await choose_rps_response(connection, creator_id, 1, total_hands)
             await connection.execute(
                 "UPDATE games SET rps_player2_move = ? WHERE id = ?",
                 (bot_move, cursor.lastrowid),
             )
         return await _locked_game(connection, cursor.lastrowid)
 
-    async def start(self, creator_id: int, is_solo: bool, game_types: tuple[GameType, ...]) -> Game:
+    async def start(
+        self, creator_id: int, is_solo: bool, game_types: tuple[GameType, ...],
+        hand_counts: tuple[int, ...] | None = None,
+    ) -> Game:
         allowed = SOLO_TYPES if is_solo else DUO_TYPES
         try:
             selected = tuple(GameType(item) for item in game_types)
@@ -146,6 +156,14 @@ class TournamentService:
             not 2 <= len(selected) <= len(allowed)
             or len(set(selected)) != len(selected)
             or any(item not in allowed for item in selected)
+        ):
+            raise InvalidGameSetup
+        try:
+            counts = (STAGE_HANDS,) * len(selected) if hand_counts is None else tuple(hand_counts)
+        except TypeError as error:
+            raise InvalidGameSetup from error
+        if len(counts) != len(selected) or any(
+            type(count) is not int or count not in ALLOWED_HAND_COUNTS for count in counts
         ):
             raise InvalidGameSetup
         now = int(time.time())
@@ -174,13 +192,15 @@ class TournamentService:
             cursor = await connection.execute(
                 """INSERT INTO tournaments
                    (creator_id, player2_id, is_solo, game_types_json,
-                    current_stage, current_game_id, status, created_at, updated_at)
-                   VALUES (?, ?, ?, ?, 1, NULL, ?, ?, ?)""",
+                    hand_counts_json, current_stage, current_game_id,
+                    status, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, 1, NULL, ?, ?, ?)""",
                 (
                     creator_id,
                     BOT_USER_ID if is_solo else None,
                     int(is_solo),
                     json.dumps([item.value for item in selected]),
+                    json.dumps(counts),
                     "active" if is_solo else "waiting",
                     now,
                     now,
@@ -194,6 +214,7 @@ class TournamentService:
                 creator_id,
                 BOT_USER_ID if is_solo else None,
                 is_solo,
+                counts[0],
             )
             await connection.execute(
                 "UPDATE tournaments SET current_game_id = ? WHERE id = ?",
@@ -267,6 +288,7 @@ class TournamentService:
                 tournament.creator_id,
                 tournament.player2_id,
                 tournament.is_solo,
+                tournament.hand_counts[next_stage - 1],
             )
             await connection.execute(
                 """UPDATE tournaments SET current_stage = ?, current_game_id = ?,

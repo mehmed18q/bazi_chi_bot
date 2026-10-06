@@ -93,7 +93,11 @@ def render_game(
             if invite_url
             else ""
         )
-        return f"{header}\n\n⏳ <b>منتظر هم‌بازی</b>\nلینک دعوت را برای دوستت بفرست.{link}"
+        challenge = ""
+        if game.game_type is not GameType.TRUTH_OR_DARE and not game.is_solo and game.tournament_id is None:
+            choice = "دارد ✅" if game.final_challenge_enabled else "ندارد ❌"
+            challenge = f"\n🔥 چالش پایانی: <b>{choice}</b>"
+        return f"{header}{challenge}\n\n⏳ <b>منتظر هم‌بازی</b>\nلینک دعوت را برای دوستت بفرست.{link}"
 
     round_name = (
         "دور"
@@ -282,6 +286,13 @@ def render_game(
                 f"🏆 <b>برنده شدی!</b>\nمنتظر انتخاب «حقیقت» یا «جرئت» توسط {opponent} باش.\n\n"
                 f"{TRUTH_OR_DARE_RULE}"
             )
+    elif game.phase is GamePhase.FINISHED and not game.has_final_challenge:
+        if game.winner_id == viewer_id:
+            state = "🏆 <b>بازی تمام شد؛ برنده شدی!</b>"
+        elif game.loser_id == viewer_id:
+            state = "🏁 <b>بازی تمام شد؛ این بار باختی.</b>"
+        else:
+            state = "🤝 <b>بازی با نتیجهٔ مساوی تمام شد.</b>"
     elif game.phase is GamePhase.FINISHED:
         choice = game.final_choice
         label = FINAL_LABELS.get(choice, "انتخاب نامشخص")

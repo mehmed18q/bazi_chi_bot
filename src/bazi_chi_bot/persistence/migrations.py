@@ -1241,4 +1241,16 @@ MIGRATIONS: tuple[str, ...] = (
         WHERE s.user_id = user_stats.telegram_id
     );
     """,
+    """
+    ALTER TABLE games ADD COLUMN final_challenge_enabled INTEGER NOT NULL DEFAULT 1
+        CHECK (final_challenge_enabled IN (0, 1));
+    ALTER TABLE group_sessions ADD COLUMN final_challenge_enabled INTEGER NOT NULL DEFAULT 0
+        CHECK (final_challenge_enabled IN (0, 1));
+    ALTER TABLE group_sessions ADD COLUMN final_target_id INTEGER REFERENCES users(telegram_id);
+    ALTER TABLE group_sessions ADD COLUMN final_approved INTEGER
+        CHECK (final_approved IN (0, 1));
+    """,
+    """
+    ALTER TABLE tournaments ADD COLUMN hand_counts_json TEXT;
+    """,
 )

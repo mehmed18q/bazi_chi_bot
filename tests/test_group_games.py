@@ -75,6 +75,99 @@ async def test_group_rps_all_members_play_and_session_survives_restart(service, 
     assert await restarted.active_in_chat(-10001) is None
 
 
+async def test_group_creator_enables_final_challenge_for_last_scoring_player(
+    service, players, database
+):
+    first, second, third = await _players(service, players)
+    group = service.group_games
+    session = await group.create(
+        -10021, 100, first.telegram_id, first.display_name,
+        GameType.ROCK_PAPER_SCISSORS, final_challenge_enabled=True,
+    )
+    for player in (second, third):
+        session = await group.join(session.id, player.telegram_id, player.display_name)
+    session = await group.start(session.id, first.telegram_id)
+    assert session.final_challenge_enabled
+
+    for round_number in range(1, 4):
+        choices = (
+            ((first, "rock"), (second, "scissors"), (third, "rock"))
+            if round_number != 2 else
+            ((first, "paper"), (second, "paper"), (third, "paper"))
+        )
+        for player, choice in choices:
+            session = await group.move(session.id, round_number, player.telegram_id, choice)
+
+    assert [player.score for player in session.players] == [2, 0, 2]
+    assert session.status == "active" and session.phase == "final_choice"
+    assert session.final_target_id == second.telegram_id
+    text, keyboard = session_card(session)
+    assert "چالش پایانی" in text and second.display_name in text
+    assert any(button.callback_data.endswith(":truth") for row in keyboard.inline_keyboard for button in row)
+    with pytest.raises(GroupSessionError, match="turn"):
+        await group.move(session.id, 3, first.telegram_id, "truth")
+
+    restarted = GameService(database).group_games
+    session = await restarted.move(session.id, 3, second.telegram_id, "truth")
+    assert session.phase == "final_response" and session.prompt_text
+    with pytest.raises(GroupSessionError, match="turn"):
+        await restarted.text_input(session.id, first.telegram_id, "answer", "پاسخ")
+    session, feedback = await restarted.text_input(
+        session.id, second.telegram_id, "answer", "پاسخ من"
+    )
+    assert session.phase == "final_review" and "ثبت شد" in feedback
+    with pytest.raises(GroupSessionError, match="turn"):
+        await restarted.move(session.id, 3, second.telegram_id, "yes")
+    session = await restarted.move(session.id, 3, first.telegram_id, "yes")
+    assert session.status == "active" and session.submitted_count == 1
+    session = await restarted.move(session.id, 3, third.telegram_id, "yes")
+    assert session.status == "finished" and session.final_approved is True
+    assert [player.score for player in session.players] == [2, 1, 2]
+    assert await restarted.active_in_chat(-10021) is None
+    assert "پاسخ من" in session_card(session)[0]
+    with pytest.raises(GroupSessionError, match="stale"):
+        await restarted.move(session.id, 3, first.telegram_id, "yes")
+
+
+async def test_group_creator_is_asked_before_session_is_created(service, players):
+    first = players[0]
+    await service.set_user_activation(first.telegram_id, first.telegram_id, True)
+    router = build_group_router(service)
+    choose_type = next(
+        item.callback for item in router.callback_query.handlers
+        if item.callback.__name__ == "group_type"
+    )
+    choose_final = next(
+        item.callback for item in router.callback_query.handlers
+        if item.callback.__name__ == "group_final_challenge"
+    )
+    callback = SimpleNamespace(
+        data=f"grp:type:{first.telegram_id}:gol",
+        from_user=TelegramUser(id=first.telegram_id, is_bot=False, first_name="صادق"),
+        message=SimpleNamespace(
+            chat=SimpleNamespace(id=-10022), message_id=101, edit_text=AsyncMock()
+        ),
+        answer=AsyncMock(),
+    )
+    bot = SimpleNamespace(get_me=AsyncMock(return_value=SimpleNamespace(username="bazi_chi_bot")))
+    await choose_type(callback, bot)
+    buttons = {
+        button.callback_data
+        for row in callback.message.edit_text.call_args.kwargs["reply_markup"].inline_keyboard
+        for button in row
+    }
+    assert buttons == {
+        f"grp:final:{first.telegram_id}:gol:1",
+        f"grp:final:{first.telegram_id}:gol:0",
+    }
+    assert await service.group_games.active_in_chat(-10022) is None
+
+    callback.data = f"grp:final:{first.telegram_id}:gol:0"
+    await choose_final(callback, bot)
+    session = await service.group_games.active_in_chat(-10022)
+    assert session is not None and not session.final_challenge_enabled
+
+
 async def test_group_gol_rotates_hider_and_hides_choice(service, players):
     first, second, third = await _players(service, players)
     group = service.group_games
@@ -217,6 +310,9 @@ async def test_group_callback_flow_checks_actor_and_chat(service, players):
     await handlers["group_new"](first_callback, bot)
     first_callback.data = f"grp:type:{first.telegram_id}:word"
     await handlers["group_type"](first_callback, bot)
+    assert await service.group_games.active_in_chat(-10006) is None
+    first_callback.data = f"grp:final:{first.telegram_id}:word:0"
+    await handlers["group_final_challenge"](first_callback, bot)
     session = await service.group_games.active_in_chat(-10006)
     assert session is not None and len(session.players) == 1
     wrong_chat = callback(second, f"grp:join:{session.id}", -10007)

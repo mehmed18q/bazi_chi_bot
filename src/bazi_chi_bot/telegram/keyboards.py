@@ -237,17 +237,36 @@ def board_text(board: str) -> str:
     return "\n".join(" ".join(symbols[c] for c in board[i : i + 3]) for i in (0, 3, 6))
 
 
-def fists_keyboard(solo: bool = False) -> InlineKeyboardMarkup:
+def final_challenge_keyboard(game_type: GameType, *, random: bool = False) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    suffix = ":random" if random else ""
+    for enabled, label in ((True, "✅ بله، چالش داشته باشیم"), (False, "❌ نه، بدون چالش")):
+        builder.button(
+            text=label,
+            callback_data=f"setup:final:{game_type.value}:{int(enabled)}{suffix}",
+        )
+    builder.button(text="↩️ تغییر بازی", callback_data="menu:new")
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def fists_keyboard(
+    solo: bool = False, final_challenge_enabled: bool | None = None
+) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     for fists in range(2, 7):
-        builder.button(text=f"{fists} مشت ✊", callback_data=f"setup:solo:f:{fists}" if solo else f"setup:f:{fists}")
+        callback = f"setup:solo:f:{fists}" if solo else f"setup:f:{fists}"
+        if final_challenge_enabled is not None and not solo:
+            callback += f":{int(final_challenge_enabled)}"
+        builder.button(text=f"{fists} مشت ✊", callback_data=callback)
     builder.button(text="🏠 منوی اصلی", callback_data="menu:home")
     builder.adjust(2, 2, 1, 1)
     return builder.as_markup()
 
 
 def hands_keyboard(
-    fists: int, game_type: GameType = GameType.GOL_YA_POOCH, solo: bool = False
+    fists: int, game_type: GameType = GameType.GOL_YA_POOCH, solo: bool = False,
+    final_challenge_enabled: bool | None = None,
 ) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     for hands in (3, 5, 7, 9):
@@ -264,6 +283,8 @@ def hands_keyboard(
                 GameType.MASTERMIND: "mastermind",
             }[game_type]
             callback = f"setup:{route}:{hands}"
+        if final_challenge_enabled is not None and not solo:
+            callback += f":{int(final_challenge_enabled)}"
         unit = (
             "دور"
             if game_type in {GameType.TRUTH_OR_DARE, GameType.WORD_GUESS, GameType.MASTERMIND}

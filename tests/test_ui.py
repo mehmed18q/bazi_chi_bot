@@ -2,10 +2,12 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from aiogram.types import User as TelegramUser
 
 from bazi_chi_bot.handlers import build_router
 from bazi_chi_bot.models import GamePhase, GameType
 from bazi_chi_bot.telegram import gameplay
+from bazi_chi_bot.telegram.shared import GamePresenter
 from bazi_chi_bot.ui import (
     START_TEXT,
     SUPPORT_TEXT,
@@ -64,8 +66,66 @@ async def test_random_game_opens_the_selected_games_setup(
         button.callback_data for row in keyboard.inline_keyboard for button in row
     }
     assert "بازی شانسی" in text and name in text
-    assert next_callback in callbacks
-    callback.answer.assert_awaited_once()
+    if game_type is GameType.TRUTH_OR_DARE:
+        assert next_callback in callbacks
+    else:
+        assert {
+            f"setup:final:{game_type.value}:0:random",
+            f"setup:final:{game_type.value}:1:random",
+        } <= callbacks
+        final_handler = next(
+            item.callback
+            for item in build_router(service).callback_query.handlers
+            if item.callback.__name__ == "setup_final_challenge"
+        )
+        callback.data = f"setup:final:{game_type.value}:1:random"
+        await final_handler(callback)
+        keyboard = callback.message.edit_text.call_args.kwargs["reply_markup"]
+        callbacks = {
+            button.callback_data for row in keyboard.inline_keyboard for button in row
+        }
+        assert f"{next_callback}:1" in callbacks
+    assert callback.answer.await_count == (1 if game_type is GameType.TRUTH_OR_DARE else 2)
+
+
+@pytest.mark.parametrize(
+    "game_type,callback_data",
+    [
+        (GameType.GOL_YA_POOCH, "setup:h:2:3:0"),
+        (GameType.TIC_TAC_TOE, "setup:ttt:3:0"),
+        (GameType.ROCK_PAPER_SCISSORS, "setup:rps:3:0"),
+        (GameType.WORD_GUESS, "setup:word:3:0"),
+        (GameType.MASTERMIND, "setup:mastermind:3:0"),
+    ],
+)
+async def test_private_setup_saves_creator_choice(
+    service, players, monkeypatch, game_type, callback_data
+):
+    async def skip_presentation(self, *args, **kwargs):
+        return None
+
+    monkeypatch.setattr(GamePresenter, "edit_game_view", skip_presentation)
+    handlers = {
+        item.callback.__name__: item.callback
+        for item in build_router(service).callback_query.handlers
+    }
+    route = {
+        GameType.GOL_YA_POOCH: "choose_hands",
+        GameType.TIC_TAC_TOE: "create_tic_tac_toe",
+        GameType.ROCK_PAPER_SCISSORS: "create_rps",
+        GameType.WORD_GUESS: "create_word_guess",
+        GameType.MASTERMIND: "create_mastermind",
+    }[game_type]
+    first = players[0]
+    callback = SimpleNamespace(
+        data=callback_data,
+        from_user=TelegramUser(id=first.telegram_id, is_bot=False, first_name=first.first_name),
+        answer=AsyncMock(),
+    )
+    await handlers[route](callback, SimpleNamespace())
+    game = await service.get_game(1)
+    assert game.game_type is game_type
+    assert not game.final_challenge_enabled
 
 
 async def test_only_current_actor_receives_action_keyboard(service, players):

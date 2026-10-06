@@ -17,9 +17,20 @@ async def test_upgrade_every_previous_schema_preserves_data_and_scores(tmp_path,
             "INSERT INTO users (telegram_id, first_name, display_name, created_at, updated_at) "
             "VALUES (101, 'first', 'first', 0, 0)"
         )
+        if version >= 30:
+            # Older upgrade paths assign this ID in a migration; the latest schema
+            # expects new rows to receive it through the user service.
+            await connection.execute("UPDATE users SET id = 1 WHERE telegram_id = 101")
         await connection.execute(
-            "INSERT INTO user_stats (telegram_id, points_won) VALUES (101, 17)"
+            "INSERT INTO user_stats (telegram_id, points_won) VALUES (101, ?)",
+            (0 if version >= 30 else 17,),
         )
+        if version >= 30:
+            # Version 30 already stores points in the event ledger.
+            await connection.execute(
+                """INSERT INTO score_events (user_id, reason, amount, created_at)
+                   VALUES (101, 'legacy', 17, unixepoch())"""
+            )
         await connection.execute(
             "INSERT INTO games (invite_token, creator_id, fists, total_hands, created_at, updated_at) "
             "VALUES ('original', 101, 2, 3, 0, 0)"
@@ -28,7 +39,9 @@ async def test_upgrade_every_previous_schema_preserves_data_and_scores(tmp_path,
     await database.initialize()
     await database.initialize()
     service = GameService(database)
-    assert (await service.get_game_by_token("original")).creator_id == 101
+    migrated_game = await service.get_game_by_token("original")
+    assert migrated_game.creator_id == 101
+    assert migrated_game.final_challenge_enabled
     assert (await service.get_stats(101)).points_won == 17
     migrated_user = await service.get_user(101)
     assert migrated_user is not None and migrated_user.id == 1

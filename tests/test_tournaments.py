@@ -29,14 +29,17 @@ async def test_duo_tournament_keeps_friend_and_advances_once(service, players, d
         first.telegram_id,
         False,
         (GameType.ROCK_PAPER_SCISSORS, GameType.GOL_YA_POOCH),
+        (5, 7),
     )
     game = started.game
+    assert game.total_hands == 5
     assert game.status is GameStatus.WAITING
     assert game.tournament_stage == 1
     game = await service.join_game(game.invite_token, second.telegram_id)
     assert game.status is GameStatus.ACTIVE
     tournament = await service.tournament_for_game(game.id)
     assert tournament.player2_id == second.telegram_id
+    assert tournament.hand_counts == (5, 7)
     game = await _finish_rps(service, game)
     assert game.status is GameStatus.FINISHED
     assert game.final_choice is None
@@ -47,6 +50,7 @@ async def test_duo_tournament_keeps_friend_and_advances_once(service, players, d
     assert next_game.tournament_stage == 2
     assert next_game.player2_id == second.telegram_id
     assert next_game.status is GameStatus.ACTIVE
+    assert next_game.total_hands == 7
     assert (await service.tournaments.sync_game(game.id)).id == next_game.id
     assert (await GameService(database).active_games(first.telegram_id))[0].id == next_game.id
     tournament = await service.tournament_for_game(next_game.id)
@@ -82,8 +86,10 @@ async def test_solo_tournament_commits_bot_moves_and_recovers_stage(service, pla
             player.telegram_id,
             True,
             (GameType.ROCK_PAPER_SCISSORS, GameType.GOL_YA_POOCH),
+            (5, 9),
         )
     ).game
+    assert game.total_hands == 5
     assert game.is_solo and game.rps_player2_move is not None
     beats = {"rock": "paper", "paper": "scissors", "scissors": "rock"}
     for _ in range(game.total_hands):
@@ -101,7 +107,30 @@ async def test_solo_tournament_commits_bot_moves_and_recovers_stage(service, pla
     assert next_game.game_type is GameType.GOL_YA_POOCH
     assert next_game.status is GameStatus.ACTIVE
     assert next_game.tournament_stage == 2
+    assert next_game.total_hands == 9
+    assert tournament.hand_counts == (5, 9)
     assert tournament.player1_score == 1
+
+
+async def test_existing_tournament_without_hand_counts_keeps_three_hands(
+    service, players, database
+):
+    first, second = players
+    game = (await service.create_tournament(
+        first.telegram_id, False,
+        (GameType.ROCK_PAPER_SCISSORS, GameType.GOL_YA_POOCH),
+    )).game
+    async with database.transaction() as connection:
+        await connection.execute(
+            "UPDATE tournaments SET hand_counts_json = NULL WHERE id = ?",
+            (game.tournament_id,),
+        )
+    restarted = GameService(database)
+    game = await restarted.join_game(game.invite_token, second.telegram_id)
+    assert (await restarted.tournament_for_game(game.id)).hand_counts == (3, 3)
+    game = await _finish_rps(restarted, game)
+    next_game = await restarted.tournaments.sync_game(game.id)
+    assert next_game.total_hands == 3
 
 
 async def test_tournament_selection_accepts_all_types_and_rejects_invalid(service, players):
@@ -122,6 +151,17 @@ async def test_tournament_selection_accepts_all_types_and_rejects_invalid(servic
     solo = await service.create_tournament(second.telegram_id, True, SOLO_TYPES)
     assert (await service.tournament_for_game(duo.game.id)).game_types == DUO_TYPES
     assert (await service.tournament_for_game(solo.game.id)).game_types == SOLO_TYPES
+
+
+@pytest.mark.parametrize("counts", [(), (3,), (2, 3), (True, 3), (3, 5, 7)])
+async def test_tournament_rejects_invalid_hand_counts(service, players, counts):
+    with pytest.raises(InvalidGameSetup):
+        await service.create_tournament(
+            players[0].telegram_id,
+            False,
+            (GameType.ROCK_PAPER_SCISSORS, GameType.GOL_YA_POOCH),
+            counts,
+        )
 
 
 async def test_tournament_wizard_count_and_order(service, players):
@@ -267,9 +307,26 @@ async def test_last_wizard_choice_starts_solo_tournament(service, players):
         edit_message_text=AsyncMock(),
     )
     await handlers["tournament_pick"](callback, bot)
+    assert await service.current_tournament(player.telegram_id) is None
+    keyboard = callback.message.edit_text.call_args.kwargs["reply_markup"]
+    values = {button.callback_data for row in keyboard.inline_keyboard for button in row}
+    assert {"tour:hands:s:2:rg:3", "tour:hands:s:2:rg:5",
+            "tour:hands:s:2:rg:7", "tour:hands:s:2:rg:9"} <= values
+
+    callback.data = "tour:hands:s:2:rg:5"
+    await handlers["tournament_hands"](callback, bot)
+    assert await service.current_tournament(player.telegram_id) is None
+    keyboard = callback.message.edit_text.call_args.kwargs["reply_markup"]
+    values = {button.callback_data for row in keyboard.inline_keyboard for button in row}
+    assert "tour:hands:s:2:rg:59" in values
+
+    callback.data = "tour:hands:s:2:rg:59"
+    await handlers["tournament_hands"](callback, bot)
     current = await service.current_tournament(player.telegram_id)
     assert current is not None
     assert current[0].game_types == (GameType.ROCK_PAPER_SCISSORS, GameType.GOL_YA_POOCH)
+    assert current[0].hand_counts == (5, 9)
+    assert current[1].total_hands == 5
     assert "تورنومنت شروع شد" in bot.send_message.call_args.args[1]
     callback.answer.assert_awaited()
 

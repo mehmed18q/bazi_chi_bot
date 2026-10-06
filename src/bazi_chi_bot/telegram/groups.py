@@ -93,9 +93,16 @@ def session_card(
     text = (
         f"🏆 <b>مسابقهٔ گروهی #{session.id}</b> | {title}\n"
         f"👥 {len(session.players)} بازیکن"
-        + (f" | دور {session.current_round} از {session.total_rounds}" if session.status == "active" else "")
+        + (
+            " | چالش پایانی" if session.phase.startswith("final_") else
+            f" | دور {session.current_round} از {session.total_rounds}"
+            if session.status == "active" else ""
+        )
         + f"\n\n<b>امتیازها</b>\n{scores}"
     )
+    if session.game_type is not GameType.TRUTH_OR_DARE:
+        state = "فعال ✅" if session.final_challenge_enabled else "غیرفعال ❌"
+        text += f"\n🔥 چالش پایانی: <b>{state}</b>"
     if session.last_result:
         text += f"\n\n{escape(session.last_result)}"
     builder = InlineKeyboardBuilder()
@@ -112,7 +119,32 @@ def session_card(
             )
     elif session.status == "active":
         move = f"grp:move:{session.id}:{session.current_round}:"
-        if session.game_type is GameType.ROCK_PAPER_SCISSORS:
+        if session.phase == "final_choice":
+            target = _name(session, session.final_target_id)
+            text += (
+                f"\n\n🎭 {target} آخرین نفر جدول امتیاز شد و باید "
+                "برای چالش پایانی «حقیقت» یا «جرئت» را انتخاب کند."
+            )
+            builder.button(text="🗣 حقیقت", callback_data=move + "truth")
+            builder.button(text="🔥 جرئت", callback_data=move + "dare")
+            builder.adjust(2)
+        elif session.phase == "final_response":
+            target = _name(session, session.final_target_id)
+            text += (
+                f"\n\n🎭 چالش پایانی {target}:\n<b>{escape(session.prompt_text or '')}</b>\n"
+                f"پاسخت را در گروه با <code>/ganswer {session.id} پاسخ من</code> بفرست."
+            )
+        elif session.phase == "final_review":
+            target = _name(session, session.final_target_id)
+            text += (
+                f"\n\n🎭 پاسخ چالش پایانی {target}: <b>{escape(session.answer_text or '')}</b>\n"
+                f"{session.submitted_count} رأی از {len(session.players) - 1} ثبت شده؛ "
+                "بقیه پاسخ را داوری کنند."
+            )
+            builder.button(text="✅ تأیید", callback_data=move + "yes")
+            builder.button(text="❌ رد", callback_data=move + "no")
+            builder.adjust(2)
+        elif session.game_type is GameType.ROCK_PAPER_SCISSORS:
             text += (
                 f"\n\n🎲 {session.submitted_count} نفر از {len(session.players)} نفر "
                 "انتخاب کرده‌اند. حرکت‌ها تا پایان دست مخفی‌اند."
@@ -188,6 +220,14 @@ def session_card(
                 builder.button(text="❌ رد", callback_data=move + "no")
         builder.button(text="🛑 لغو توسط شروع‌کننده", callback_data=f"grp:cancel:{session.id}")
     elif session.status == "finished":
+        if session.final_target_id is not None:
+            target = _name(session, session.final_target_id)
+            verdict = "تأیید شد؛ یک امتیاز گرفت ✅" if session.final_approved else "تأیید نشد ❌"
+            text += (
+                f"\n\n🎭 چالش پایانی {target}: <b>{escape(session.prompt_text or '')}</b>"
+                f"\n📩 پاسخ: <b>{escape(session.answer_text or '')}</b>"
+                f"\n{verdict}"
+            )
         high = max(player.score for player in session.players)
         winners = [_name(session, p.user_id) for p in session.players if p.score == high]
         text += f"\n\n🏁 پایان مسابقه؛ برنده: <b>{'، '.join(winners[:10])}</b>"
@@ -425,17 +465,56 @@ def build_group_router(
             return
         if not await allowed(callback, bot):
             return
+        if code != "tod":
+            builder = InlineKeyboardBuilder()
+            for enabled, label in ((True, "✅ بله، چالش داشته باشیم"), (False, "❌ نه، بدون چالش")):
+                builder.button(
+                    text=label,
+                    callback_data=f"grp:final:{owner_id}:{code}:{int(enabled)}",
+                )
+            builder.adjust(1)
+            await safe_edit(
+                callback,
+                f"{GROUP_TYPES[code][1]}\n\n🔥 می‌خواهی آخرین نفر جدول امتیاز "
+                "در پایان مسابقه «جرئت یا حقیقت» انجام بدهد؟",
+                builder.as_markup(),
+            )
+            await callback.answer()
+            return
+        await create_group_session(callback, bot, owner_id, code, False)
+
+    async def create_group_session(
+        callback: CallbackQuery, bot: Bot, owner_id: int, code: str, enabled: bool
+    ) -> None:
         await service.save_user(telegram_user(callback.from_user))
         try:
             session = await service.group_games.create(
                 callback.message.chat.id, callback.message.message_id,
                 owner_id, callback.from_user.full_name, GROUP_TYPES[code][0],
+                final_challenge_enabled=enabled,
             )
         except GroupSessionError as error:
             await callback.answer(ERROR_TEXT.get(str(error), ERROR_TEXT["setup"]), show_alert=True)
             return
         await show(callback, bot, session)
         await callback.answer("منتظر اعلام آمادگی اعضا هستیم ✅")
+
+    @router.callback_query(F.data.startswith("grp:final:"))
+    async def group_final_challenge(callback: CallbackQuery, bot: Bot) -> None:
+        try:
+            _, _, owner_text, code, enabled_text = (callback.data or "").split(":")
+            owner_id = int(owner_text)
+            if code not in GROUP_TYPES or code == "tod" or enabled_text not in ("0", "1"):
+                raise ValueError
+        except ValueError:
+            await callback.answer(ERROR_TEXT["setup"], show_alert=True)
+            return
+        if callback.from_user.id != owner_id:
+            await callback.answer(ERROR_TEXT["owner"], show_alert=True)
+            return
+        if not await allowed(callback, bot):
+            return
+        await create_group_session(callback, bot, owner_id, code, enabled_text == "1")
 
     @router.callback_query(F.data.startswith("grp:join:"))
     async def group_join(callback: CallbackQuery, bot: Bot) -> None:

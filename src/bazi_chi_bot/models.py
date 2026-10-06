@@ -180,6 +180,16 @@ class Game:
     rps_player2_move: str | None = None
     tournament_id: int | None = None
     tournament_stage: int | None = None
+    final_challenge_enabled: bool = True
+
+    @property
+    def has_final_challenge(self) -> bool:
+        return (
+            self.final_challenge_enabled
+            and not self.is_solo
+            and self.tournament_id is None
+            and self.game_type is not GameType.TRUTH_OR_DARE
+        )
 
     def score_for(self, user_id: int) -> int:
         if user_id == self.creator_id:
@@ -294,6 +304,7 @@ class Tournament:
     player2_id: int | None
     is_solo: bool
     game_types: tuple[GameType, ...]
+    hand_counts: tuple[int, ...]
     current_stage: int
     current_game_id: int
     player1_score: int

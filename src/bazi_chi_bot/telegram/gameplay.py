@@ -24,6 +24,7 @@ from ..ui import (
     game_types_keyboard,
     hands_keyboard,
 )
+from .keyboards import final_challenge_keyboard
 from .shared import (
     GamePresenter,
     final_choice_label,
@@ -88,6 +89,8 @@ GAME_SETUP: dict[GameType, tuple[str, str, int]] = {
     ),
 }
 
+FINAL_CHALLENGE_TYPES = frozenset(GAME_SETUP) - {GameType.TRUTH_OR_DARE}
+
 
 def register_handlers(
     router: Router,
@@ -109,7 +112,8 @@ def register_handlers(
         return advance.game, prefix
 
     async def show_setup(
-        callback: CallbackQuery, game_type: GameType, *, random: bool = False, solo: bool = False
+        callback: CallbackQuery, game_type: GameType, *, random: bool = False,
+        solo: bool = False, final_challenge_enabled: bool | None = None,
     ) -> None:
         name, text, fists = GAME_SETUP[game_type]
         if solo and game_type is GameType.TIC_TAC_TOE:
@@ -119,13 +123,46 @@ def register_handlers(
             )
         if random:
             text = f"🎲 <b>بازی شانسی: {name}</b>\n\n{text}"
+        if final_challenge_enabled is not None:
+            state = "دارد ✅" if final_challenge_enabled else "ندارد ❌"
+            text += f"\n\n🔥 چالش پایانی: <b>{state}</b>"
         keyboard = (
-            fists_keyboard(solo=solo)
+            fists_keyboard(solo=solo, final_challenge_enabled=final_challenge_enabled)
             if game_type is GameType.GOL_YA_POOCH
-            else hands_keyboard(fists, game_type, solo=solo)
+            else hands_keyboard(
+                fists, game_type, solo=solo,
+                final_challenge_enabled=final_challenge_enabled,
+            )
         )
         await safe_edit(callback, text, keyboard)
         await callback.answer()
+
+    async def ask_final_challenge(
+        callback: CallbackQuery, game_type: GameType, *, random: bool = False
+    ) -> None:
+        name = GAME_SETUP[game_type][0]
+        prefix = "🎲 بازی شانسی: " if random else "🎮 بازی: "
+        await safe_edit(
+            callback,
+            f"{prefix}<b>{name}</b>\n\n🔥 می‌خواهی بازنده در پایان بازی «جرئت یا حقیقت» انجام بدهد؟",
+            final_challenge_keyboard(game_type, random=random),
+        )
+        await callback.answer()
+
+    def setup_final_enabled(data: str, expected_parts: int) -> bool:
+        parts = data.split(":")
+        if len(parts) == expected_parts:
+            return True  # Buttons sent before this change keep their original behavior.
+        if len(parts) == expected_parts + 1 and parts[-1] in ("0", "1"):
+            return parts[-1] == "1"
+        raise ValueError("Invalid final challenge choice")
+
+    def setup_rounds(data: str, route: str) -> tuple[int, bool]:
+        parts = data.split(":")
+        if parts[:2] != ["setup", route]:
+            raise ValueError("Invalid game route")
+        enabled = setup_final_enabled(data, 3)
+        return int(parts[2]), enabled
 
     @router.callback_query(F.data == "menu:new")
     async def new_game(callback: CallbackQuery) -> None:
@@ -151,7 +188,30 @@ def register_handlers(
 
     @router.callback_query(F.data == "setup:type:random")
     async def setup_random(callback: CallbackQuery) -> None:
-        await show_setup(callback, choice(tuple(GAME_SETUP)), random=True)
+        game_type = choice(tuple(GAME_SETUP))
+        if game_type in FINAL_CHALLENGE_TYPES:
+            await ask_final_challenge(callback, game_type, random=True)
+        else:
+            await show_setup(callback, game_type, random=True)
+
+    @router.callback_query(F.data.startswith("setup:final:"))
+    async def setup_final_challenge(callback: CallbackQuery) -> None:
+        parts = (callback.data or "").split(":")
+        try:
+            if len(parts) not in (4, 5) or parts[3] not in ("0", "1"):
+                raise ValueError
+            if len(parts) == 5 and parts[4] != "random":
+                raise ValueError
+            game_type = GameType(parts[2])
+            if game_type not in FINAL_CHALLENGE_TYPES:
+                raise ValueError
+        except ValueError:
+            await callback.answer("انتخاب نامعتبر است.", show_alert=True)
+            return
+        await show_setup(
+            callback, game_type, random=len(parts) == 5,
+            final_challenge_enabled=parts[3] == "1",
+        )
 
     @router.callback_query(F.data == "setup:solo")
     async def setup_solo(callback: CallbackQuery) -> None:
@@ -215,19 +275,20 @@ def register_handlers(
 
     @router.callback_query(F.data == "setup:type:ttt")
     async def setup_tic_tac_toe(callback: CallbackQuery) -> None:
-        await show_setup(callback, GameType.TIC_TAC_TOE)
+        await ask_final_challenge(callback, GameType.TIC_TAC_TOE)
 
     @router.callback_query(F.data == "setup:type:rps")
     async def setup_rps(callback: CallbackQuery) -> None:
-        await show_setup(callback, GameType.ROCK_PAPER_SCISSORS)
+        await ask_final_challenge(callback, GameType.ROCK_PAPER_SCISSORS)
 
     @router.callback_query(F.data.startswith("setup:rps:"))
     async def create_rps(callback: CallbackQuery, bot: Bot) -> None:
         try:
-            hands = int((callback.data or "").rsplit(":", 1)[1])
+            hands, enabled = setup_rounds(callback.data or "", "rps")
             await service.save_user(telegram_user(callback.from_user))
             game = await service.create_game(
-                callback.from_user.id, 2, hands, GameType.ROCK_PAPER_SCISSORS
+                callback.from_user.id, 2, hands, GameType.ROCK_PAPER_SCISSORS,
+                final_challenge_enabled=enabled,
             )
         except (ValueError, GameError):
             await callback.answer("تنظیمات بازی درست نیست.", show_alert=True)
@@ -242,7 +303,7 @@ def register_handlers(
     @router.callback_query(F.data.startswith("setup:tod:"))
     async def create_truth_or_dare(callback: CallbackQuery, bot: Bot) -> None:
         try:
-            hands = int((callback.data or "").rsplit(":", 1)[1])
+            hands, _ = setup_rounds(callback.data or "", "tod")
             await service.save_user(telegram_user(callback.from_user))
             game = await service.create_game(
                 callback.from_user.id, 2, hands, GameType.TRUTH_OR_DARE
@@ -255,19 +316,20 @@ def register_handlers(
 
     @router.callback_query(F.data == "setup:type:word")
     async def setup_word_guess(callback: CallbackQuery) -> None:
-        await show_setup(callback, GameType.WORD_GUESS)
+        await ask_final_challenge(callback, GameType.WORD_GUESS)
 
     @router.callback_query(F.data == "setup:type:mastermind")
     async def setup_mastermind(callback: CallbackQuery) -> None:
-        await show_setup(callback, GameType.MASTERMIND)
+        await ask_final_challenge(callback, GameType.MASTERMIND)
 
     @router.callback_query(F.data.startswith("setup:mastermind:"))
     async def create_mastermind(callback: CallbackQuery, bot: Bot) -> None:
         try:
-            rounds = int((callback.data or "").rsplit(":", 1)[1])
+            rounds, enabled = setup_rounds(callback.data or "", "mastermind")
             await service.save_user(telegram_user(callback.from_user))
             game = await service.create_game(
-                callback.from_user.id, 8, rounds, GameType.MASTERMIND
+                callback.from_user.id, 8, rounds, GameType.MASTERMIND,
+                final_challenge_enabled=enabled,
             )
         except ValueError, GameError:
             await callback.answer("تنظیمات بازی درست نیست.", show_alert=True)
@@ -278,9 +340,12 @@ def register_handlers(
     @router.callback_query(F.data.startswith("setup:word:"))
     async def create_word_guess(callback: CallbackQuery, bot: Bot) -> None:
         try:
-            rounds = int((callback.data or "").rsplit(":", 1)[1])
+            rounds, enabled = setup_rounds(callback.data or "", "word")
             await service.save_user(telegram_user(callback.from_user))
-            game = await service.create_game(callback.from_user.id, 2, rounds, GameType.WORD_GUESS)
+            game = await service.create_game(
+                callback.from_user.id, 2, rounds, GameType.WORD_GUESS,
+                final_challenge_enabled=enabled,
+            )
         except ValueError, GameError:
             await callback.answer("تنظیمات بازی درست نیست.", show_alert=True)
             return
@@ -290,9 +355,12 @@ def register_handlers(
     @router.callback_query(F.data.startswith("setup:ttt:"))
     async def create_tic_tac_toe(callback: CallbackQuery, bot: Bot) -> None:
         try:
-            hands = int((callback.data or "").rsplit(":", 1)[1])
+            hands, enabled = setup_rounds(callback.data or "", "ttt")
             await service.save_user(telegram_user(callback.from_user))
-            game = await service.create_game(callback.from_user.id, 2, hands, GameType.TIC_TAC_TOE)
+            game = await service.create_game(
+                callback.from_user.id, 2, hands, GameType.TIC_TAC_TOE,
+                final_challenge_enabled=enabled,
+            )
         except ValueError, GameError:
             await callback.answer("تنظیمات بازی درست نیست.", show_alert=True)
             return
@@ -301,12 +369,14 @@ def register_handlers(
 
     @router.callback_query(F.data == "setup:type:gol")
     async def setup_gol(callback: CallbackQuery) -> None:
-        await show_setup(callback, GameType.GOL_YA_POOCH)
+        await ask_final_challenge(callback, GameType.GOL_YA_POOCH)
 
     @router.callback_query(F.data.startswith("setup:f:"))
     async def choose_fists(callback: CallbackQuery) -> None:
         try:
-            fists = int((callback.data or "").split(":")[2])
+            parts = (callback.data or "").split(":")
+            enabled = setup_final_enabled(callback.data or "", 3)
+            fists = int(parts[2])
         except ValueError, IndexError:
             await callback.answer("انتخاب نامعتبر است.", show_alert=True)
             return
@@ -316,16 +386,21 @@ def register_handlers(
         await safe_edit(
             callback,
             f"✊ <b>{fists} مشت</b> انتخاب شد.\n\n🧮 چند دست بازی کنیم؟",
-            hands_keyboard(fists),
+            hands_keyboard(fists, final_challenge_enabled=enabled),
         )
         await callback.answer()
 
     @router.callback_query(F.data.startswith("setup:h:"))
     async def choose_hands(callback: CallbackQuery, bot: Bot) -> None:
         try:
-            _, _, fists_text, hands_text = (callback.data or "").split(":")
+            data = callback.data or ""
+            enabled = setup_final_enabled(data, 4)
+            _, _, fists_text, hands_text = data.split(":")[:4]
             fists, hands = int(fists_text), int(hands_text)
-            game = await service.create_game(callback.from_user.id, fists, hands)
+            game = await service.create_game(
+                callback.from_user.id, fists, hands,
+                final_challenge_enabled=enabled,
+            )
         except ValueError, GameError:
             await callback.answer("تنظیمات بازی معتبر نیست.", show_alert=True)
             return

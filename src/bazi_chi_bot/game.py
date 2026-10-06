@@ -204,8 +204,13 @@ class GameService:
         fists: int,
         total_hands: int,
         game_type: GameType = GameType.GOL_YA_POOCH,
+        *,
+        final_challenge_enabled: bool = True,
     ) -> Game:
-        return await self.matches.create_game(creator_id, fists, total_hands, game_type)
+        return await self.matches.create_game(
+            creator_id, fists, total_hands, game_type,
+            final_challenge_enabled=final_challenge_enabled,
+        )
 
     async def join_game(self, invite_token: str, player_id: int) -> Game:
         return await self.matches.join_game(invite_token, player_id)
@@ -217,9 +222,10 @@ class GameService:
         return await self.advance_bot(game.id)
 
     async def create_tournament(
-        self, creator_id: int, is_solo: bool, game_types: tuple[GameType, ...]
+        self, creator_id: int, is_solo: bool, game_types: tuple[GameType, ...],
+        hand_counts: tuple[int, ...] | None = None,
     ) -> BotAdvance:
-        game = await self.tournaments.start(creator_id, is_solo, game_types)
+        game = await self.tournaments.start(creator_id, is_solo, game_types, hand_counts)
         return await self.advance_bot(game.id) if is_solo else BotAdvance(game, ())
 
     async def tournament_for_game(self, game_id: int) -> Tournament | None:

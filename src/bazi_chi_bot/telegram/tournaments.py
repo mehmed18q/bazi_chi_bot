@@ -8,7 +8,8 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from ..game import GameError, GameService
 from ..models import GameType
-from ..services.tournaments import DUO_TYPES, SOLO_TYPES, STAGE_HANDS
+from ..rules import ALLOWED_HAND_COUNTS
+from ..services.tournaments import DUO_TYPES, SOLO_TYPES
 from .shared import GamePresenter, safe_edit, telegram_user
 
 CODES = {
@@ -38,6 +39,42 @@ def _selection_keyboard(mode: str, count: int, selected: tuple[str, ...]):
     builder.button(text="↩️ از ابتدا", callback_data="menu:tournament")
     builder.adjust(2)
     return builder.as_markup()
+
+
+def _hand_count_keyboard(
+    mode: str, count: int, selected: tuple[str, ...], hand_counts: tuple[int, ...]
+):
+    builder = InlineKeyboardBuilder()
+    game_type = CODES[selected[len(hand_counts)]][0]
+    unit = "دور" if game_type in (
+        GameType.WORD_GUESS, GameType.MASTERMIND, GameType.TRUTH_OR_DARE
+    ) else "دست"
+    for hands in sorted(ALLOWED_HAND_COUNTS):
+        encoded_counts = "".join(str(item) for item in (*hand_counts, hands))
+        builder.button(
+            text=f"{hands} {unit}",
+            callback_data=(
+                f"tour:hands:{mode}:{count}:{''.join(selected)}:{encoded_counts}"
+            ),
+        )
+    builder.button(text="↩️ از ابتدا", callback_data="menu:tournament")
+    builder.adjust(2, 2, 1)
+    return builder.as_markup()
+
+
+async def _show_hand_count(
+    callback: CallbackQuery, mode: str, count: int,
+    selected: tuple[str, ...], hand_counts: tuple[int, ...],
+) -> None:
+    stage = len(hand_counts) + 1
+    name = CODES[selected[stage - 1]][1]
+    await safe_edit(
+        callback,
+        f"🏆 <b>تعداد دست یا دورِ بازی {stage} از {count}</b>\n\n"
+        f"{name}\nچند دست یا دور بازی کنیم؟",
+        _hand_count_keyboard(mode, count, selected, hand_counts),
+    )
+    await callback.answer()
 
 
 def register_handlers(router: Router, service: GameService) -> None:
@@ -71,8 +108,8 @@ def register_handlers(router: Router, service: GameService) -> None:
         await safe_edit(
             callback,
             "🏆 <b>تورنومنت تازه</b>\n\nاول حریف را انتخاب کن. "
-            "بعد تعداد بازی‌های متفاوت و ترتیب آن‌ها را مشخص می‌کنی. "
-            f"هر بازی {STAGE_HANDS} دست یا دور دارد؛ برندهٔ هر بازی یک برد تورنومنت می‌گیرد.",
+            "بعد تعداد بازی‌های متفاوت، ترتیب و تعداد دست یا دورِ هر بازی را مشخص می‌کنی. "
+            "برندهٔ هر بازی یک برد تورنومنت می‌گیرد.",
             builder.as_markup(),
         )
         await callback.answer()
@@ -187,12 +224,39 @@ def register_handlers(router: Router, service: GameService) -> None:
             )
             await callback.answer()
             return
+        await _show_hand_count(callback, mode, count, selected, ())
+
+    @router.callback_query(F.data.startswith("tour:hands:"))
+    async def tournament_hands(callback: CallbackQuery, bot: Bot) -> None:
+        try:
+            _, _, mode, count_text, encoded, counts_text = (callback.data or "").split(":")
+            count = int(count_text)
+            selected = tuple(encoded)
+            hand_counts = tuple(int(item) for item in counts_text)
+            allowed = _options(mode)
+            if (
+                mode not in ("s", "d")
+                or not 2 <= count <= len(allowed)
+                or len(selected) != count
+                or len(set(selected)) != count
+                or any(code not in allowed for code in selected)
+                or not 1 <= len(hand_counts) <= count
+                or any(item not in ALLOWED_HAND_COUNTS for item in hand_counts)
+            ):
+                raise ValueError
+        except ValueError:
+            await callback.answer("تعداد دست یا دور معتبر نیست.", show_alert=True)
+            return
+        if len(hand_counts) < count:
+            await _show_hand_count(callback, mode, count, selected, hand_counts)
+            return
         try:
             await service.save_user(telegram_user(callback.from_user))
             advance = await service.create_tournament(
                 callback.from_user.id,
                 mode == "s",
                 tuple(CODES[code][0] for code in selected),
+                hand_counts,
             )
         except GameError:
             await callback.answer(

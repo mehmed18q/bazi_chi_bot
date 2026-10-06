@@ -76,6 +76,8 @@ class MatchService:
         fists: int,
         total_hands: int,
         game_type: GameType = GameType.GOL_YA_POOCH,
+        *,
+        final_challenge_enabled: bool = True,
     ) -> Game:
         try:
             game_type = GameType(game_type)
@@ -103,7 +105,11 @@ class MatchService:
             ).fetchone()
             if existing is not None:
                 game = _game_from_row(existing)
-                if game.fists == fists and game.total_hands == total_hands:
+                if (
+                    game.fists == fists
+                    and game.total_hands == total_hands
+                    and game.final_challenge_enabled == final_challenge_enabled
+                ):
                     return game
                 await connection.execute(
                     """
@@ -121,10 +127,13 @@ class MatchService:
                         """
                         INSERT INTO games (
                             invite_token, creator_id, fists, total_hands,
-                            created_at, updated_at, game_type
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                            created_at, updated_at, game_type, final_challenge_enabled
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                         """,
-                        (token, creator_id, fists, total_hands, now, now, game_type.value),
+                        (
+                            token, creator_id, fists, total_hands, now, now,
+                            game_type.value, int(final_challenge_enabled),
+                        ),
                     )
                     game_id = cursor.lastrowid
                     break
@@ -404,8 +413,8 @@ class MatchService:
                         player2_score,
                         winner_id,
                         loser_id,
-                        "finished" if game.is_solo or game.tournament_id else "choice",
-                        "finished" if game.is_solo or game.tournament_id else "choice",
+                        "choice" if game.has_final_challenge else "finished",
+                        "choice" if game.has_final_challenge else "finished",
                         now,
                         game.id,
                         game.version,
@@ -522,9 +531,9 @@ class MatchService:
                     None if not finished else creator_move,
                     next_bot_move if not finished else player2_move,
                     winner_id, loser_id,
-                    ("finished" if game.is_solo or game.tournament_id or winner_id is None else "choice")
+                    ("choice" if winner_id is not None and game.has_final_challenge else "finished")
                     if finished else "active",
-                    ("finished" if game.is_solo or game.tournament_id or winner_id is None else "choice")
+                    ("choice" if winner_id is not None and game.has_final_challenge else "finished")
                     if finished else "guessing",
                     now, game.id, game.version,
                 ),
@@ -679,8 +688,8 @@ class MatchService:
                         player2_score,
                         winner_id,
                         loser_id,
-                        "finished" if game.is_solo or game.tournament_id else "choice",
-                        "finished" if game.is_solo or game.tournament_id else "choice",
+                        "choice" if game.has_final_challenge else "finished",
+                        "choice" if game.has_final_challenge else "finished",
                         now,
                         game.id,
                         game.version,
@@ -829,8 +838,8 @@ class MatchService:
                     player2_score,
                     winner_id,
                     loser_id,
-                    "finished" if game.is_solo or game.tournament_id else "choice",
-                    "finished" if game.is_solo or game.tournament_id else "choice",
+                    "choice" if game.has_final_challenge else "finished",
+                    "choice" if game.has_final_challenge else "finished",
                     now,
                     game.id,
                     game.version,
@@ -994,6 +1003,9 @@ class MatchService:
             if round_finished and not finished:
                 starter = game.opponent_of(starter)
                 next_player = starter
+            final_phase = (
+                "choice" if winner is not None and game.has_final_challenge else "finished"
+            )
             await connection.execute(
                 """
                 UPDATE games SET board = ?, next_player_id = ?, round_starter_id = ?,
@@ -1008,8 +1020,8 @@ class MatchService:
                     score1,
                     score2,
                     game.hand_number + int((round_finished if game.is_solo else won) and not finished),
-                    ("finished" if game.is_solo or game.tournament_id else "choice") if finished else "active",
-                    ("finished" if game.is_solo or game.tournament_id else "choice") if finished else "guessing",
+                    final_phase if finished else "active",
+                    final_phase if finished else "guessing",
                     winner,
                     loser,
                     int(time.time()),
