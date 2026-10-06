@@ -44,8 +44,7 @@ def register_handlers(
         return (
             (
                 "💌 <b>تنظیم شمارش‌معکوس</b>\n\n"
-                "مخاطب را انتخاب کن. این فهرست فقط شامل کسانی است که قبلاً "
-                "ربات را شروع کرده‌اند:"
+                "مخاطب را انتخاب کن. این فهرست کاربران ثبت‌شده در ربات است:"
             ),
             countdown_users_keyboard(users),
         )
@@ -109,8 +108,8 @@ def register_handlers(
             return
         if len(parts) != 3:
             await message.answer(
-                "فرمت فرمان درست نیست. نمونه:\n"
-                "<code>/countdown @username 2026-09-08 21:30</code>\n\n"
+                "فرمت فرمان درست نیست. قالب فرمان:\n"
+                "<code>/countdown @username YYYY-MM-DD HH:MM</code>\n\n"
                 f"🕰 منطقهٔ زمانی: <b>{escape(countdown_timezone)}</b>\n"
                 "می‌توانی به‌جای نام کاربری، شناسهٔ عددی تلگرام را بنویسی."
             )
@@ -119,7 +118,7 @@ def register_handlers(
         target = await countdown_service.resolve_user(parts[0])
         if target is None:
             await message.answer(
-                "این کاربر را پیدا نکردم. باید قبلاً ربات را استارت کرده باشد و "
+                "این کاربر را پیدا نکردم. باید در ربات ثبت شده باشد و "
                 "نام کاربری یا شناسهٔ عددی‌اش درست باشد. 🔍"
             )
             return
@@ -235,7 +234,7 @@ def register_handlers(
         except ValueError:
             await message.answer(
                 "تاریخ معتبر نیست؛ دوباره با این قالب بفرست:\n"
-                "<code>2026-09-08 15:30</code>\n\n"
+                "<code>YYYY-MM-DD HH:MM</code>\n\n"
                 "برای خروج هم <code>/cancel</code> را بفرست."
             )
             return
@@ -314,8 +313,8 @@ def register_handlers(
             callback,
             "✅ مخاطب انتخاب شد:\n"
             f"👤 <b>{escape(target.display_name)}</b>{username}\n\n"
-            "حالا تاریخ و ساعت میلادی را به وقت تهران با این قالب بفرست:\n"
-            "<code>2026-09-08 15:30</code>\n\n"
+            f"حالا تاریخ و ساعت میلادی را به وقت {escape(countdown_timezone)} با این قالب بفرست:\n"
+            "<code>YYYY-MM-DD HH:MM</code>\n\n"
             "برای لغو هم <code>/cancel</code> را بفرست.",
         )
         await callback.answer("مخاطب انتخاب شد ✅")

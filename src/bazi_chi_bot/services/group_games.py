@@ -324,10 +324,10 @@ class GroupGameService:
                 if any(all(board[index] == mark for index in line) for line in WIN_LINES):
                     await self._award(connection, session_id, [user_id])
                     return await self._complete(
-                        connection, session, f"❌⭕ بازی {round_number}: یک امتیاز برای {self._name(session, user_id)}."
+                        connection, session, f"❌⭕ دست {round_number}: یک امتیاز برای {self._name(session, user_id)}."
                     )
                 if "." not in board:
-                    return await self._complete(connection, session, f"❌⭕ بازی {round_number} مساوی شد.")
+                    return await self._complete(connection, session, f"❌⭕ دست {round_number} مساوی شد.")
                 return await self._load(connection, session_id)
 
             if session.game_type is GameType.GOL_YA_POOCH:

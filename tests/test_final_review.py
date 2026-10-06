@@ -66,7 +66,7 @@ async def test_review_scores_once_and_recovers(
     assert game_keyboard(result, game.winner_id) is None
     assert await GameService(database).get_game(game.id) == result
     text = render_game(result, game.loser_id, {})
-    assert ("۱ امتیاز به مجموع" if approved else "امتیازی اضافه نشد") in text
+    assert ("۱ امتیاز برای پاسخ‌دهنده ثبت شد" if approved else "امتیازی اضافه نشد") in text
 
 
 async def test_simultaneous_reviews_apply_only_once(service, players):
@@ -100,7 +100,7 @@ async def test_review_callback_notifies_respondent(service, players):
     )
     bot = SimpleNamespace(send_message=AsyncMock())
     await action(callback, bot)
-    assert "۱ امتیاز به مجموع" in callback.message.edit_text.call_args.args[0]
+    assert "۱ امتیاز برای پاسخ‌دهنده ثبت شد" in callback.message.edit_text.call_args.args[0]
     assert bot.send_message.call_args.args[0] == game.loser_id
-    assert "۱ امتیاز به مجموع" in bot.send_message.call_args.args[1]
+    assert "۱ امتیاز برای پاسخ‌دهنده ثبت شد" in bot.send_message.call_args.args[1]
     assert bot.send_message.call_args.kwargs["reply_markup"] is None

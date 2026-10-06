@@ -77,6 +77,37 @@ async def test_rps_draw_counts_as_hand_and_match_can_end_draw(service, players):
     assert game.winner_id is None and game.player1_score == game.player2_score == 0
 
 
+async def test_rps_final_challenge_stays_visible_through_review(service, players):
+    first, second = players
+    names = {first.telegram_id: "اول", second.telegram_id: "دوم"}
+    game = await service.create_game(first.telegram_id, 2, 3, GameType.ROCK_PAPER_SCISSORS)
+    game = await service.join_game(game.invite_token, second.telegram_id)
+    for _ in range(3):
+        starter = game.next_player_id
+        first_move = "rock" if starter == first.telegram_id else "scissors"
+        game = (await service.play_rps(game.id, starter, first_move, game.version)).game
+        second_move = "rock" if game.next_player_id == first.telegram_id else "scissors"
+        game = (await service.play_rps(
+            game.id, game.next_player_id, second_move, game.version
+        )).game
+
+    assert game.winner_id == first.telegram_id
+    game = await service.choose_final(game.id, second.telegram_id, "truth", game.version)
+    loser_view = render_game(game, second.telegram_id, names)
+    assert "متن سؤال یا چالش" in loser_view
+    assert "جوابت را همینجا بفرست" in loser_view
+
+    game = await service.submit_final_response(game.id, second.telegram_id, "پاسخ من")
+    winner_view = render_game(game, first.telegram_id, names)
+    assert "پاسخ من" in winner_view
+    assert "تأیید تو ۱ امتیاز" in winner_view
+
+    game = await service.review_final_response(game.id, first.telegram_id, True, game.version)
+    assert "۱ امتیاز برای پاسخ‌دهنده ثبت شد" in render_game(
+        game, second.telegram_id, names
+    )
+
+
 async def test_solo_bot_commits_before_human_move_and_awards_match_once(service, players, database):
     player = players[0]
     game = (

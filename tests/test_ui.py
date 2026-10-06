@@ -158,6 +158,7 @@ def test_required_branding_and_final_rule_are_present():
     assert "جرئت" in TRUTH_OR_DARE_RULE
     assert "برنده" in TRUTH_OR_DARE_RULE
     assert "مساوی: <b>1</b>" in stats_text("بازیکن", 3, 1, 1, 0, 0, 0)
+    assert "امتیاز ماه جاری" in stats_text("بازیکن", 3, 1, 1, 0, 0, 2)
 
 
 async def test_admin_controls_are_behind_an_admin_only_menu(players):

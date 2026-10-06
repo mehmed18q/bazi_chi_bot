@@ -96,7 +96,9 @@ def register_handlers(
             f"شناسهٔ داخلی: <code>{user.id if user.id is not None else '—'}</code>\n"
             f"شناسهٔ تلگرام: <code>{user.telegram_id}</code>\n"
             f"اشتراک ویژه: <b>{'فعال ✅' if user.is_activated else 'ندارد 🔒'}</b>\n\n"
-            f"بازی‌ها: {stats.games_played}\nبرد: {stats.wins}\nامتیاز: {stats.points_won}"
+            f"بازی‌ها (همهٔ دوره‌ها): {stats.games_played}\n"
+            f"برد (همهٔ دوره‌ها): {stats.wins}\n"
+            f"امتیاز ماه جاری: {stats.points_won}"
         )
 
     def game_title(game_type: GameType) -> str:

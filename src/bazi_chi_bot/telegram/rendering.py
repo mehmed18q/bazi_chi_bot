@@ -15,8 +15,8 @@ from ..models import (
     MastermindGuess,
     WordGuess,
 )
-from .keyboards import board_text
 from ..rules import MASTERMIND_COLOR_EMOJIS, MASTERMIND_MAX_ATTEMPTS
+from .keyboards import board_text
 from .texts import FINAL_LABELS, TRUTH_OR_DARE_RULE
 
 GAME_TEXT_PREVIEW_LENGTH = 1200
@@ -84,7 +84,7 @@ def render_game(
     elif game.game_type is GameType.MASTERMIND:
         header = (
             f"🎨 <b>فکر بکر #{game.id}</b>\n"
-            f"🧮 {game.total_hands} دور | 🎯 {MASTERMIND_MAX_ATTEMPTS} تلاش در هر دور"
+            f"🧮 {game.total_hands} دور | 🎯 حداکثر {MASTERMIND_MAX_ATTEMPTS} تلاش در هر دور"
         )
 
     if game.status is GameStatus.WAITING:
@@ -107,7 +107,7 @@ def render_game(
     hand = f"\n\n🎲 {round_name} <b>{game.hand_number}</b> از <b>{game.total_hands}</b>"
     if game.is_solo and game.status is GameStatus.FINISHED:
         if game.winner_id == viewer_id:
-            state = "🏆 <b>ربات را بردی!</b> یک امتیاز به مجموع امتیازهایت اضافه شد."
+            state = "🏆 <b>ربات را بردی!</b> یک امتیاز برایت ثبت شد."
         elif game.winner_id is None:
             state = "🤝 <b>بازی با ربات مساوی شد.</b> امتیازی ثبت نشد."
         else:
@@ -121,7 +121,11 @@ def render_game(
             state = "🏆 <b>این بازی تورنومنت را بردی!</b>"
         else:
             state = "🏁 <b>این بازی تورنومنت را باختی.</b>"
-    elif game.game_type is GameType.ROCK_PAPER_SCISSORS and game.status is GameStatus.FINISHED:
+    elif (
+        game.game_type is GameType.ROCK_PAPER_SCISSORS
+        and game.status is GameStatus.FINISHED
+        and not game.has_final_challenge
+    ):
         state = "🤝 <b>بازی مساوی تمام شد.</b>" if game.winner_id is None else (
             "🏆 <b>برنده شدی!</b>" if game.winner_id == viewer_id
             else "🏁 <b>این بار باختی.</b>"
@@ -355,7 +359,7 @@ def render_game(
     if game.status is GameStatus.FINISHED and game.final_response_text is not None:
         if game.final_response_approved is True:
             state += (
-                "\n\n✅ انجام جرئت یا حقیقت تأیید شد؛ ۱ امتیاز به مجموع امتیاز پاسخ‌دهنده اضافه شد."
+                "\n\n✅ انجام جرئت یا حقیقت تأیید شد؛ ۱ امتیاز برای پاسخ‌دهنده ثبت شد."
             )
         elif game.final_response_approved is False:
             state += "\n\n❌ انجام جرئت یا حقیقت تأیید نشد؛ امتیازی اضافه نشد."
@@ -375,10 +379,10 @@ def stats_text(
     draws = max(games - wins - losses, 0)
     return f"""📊 <b>آمار {escape(display_name)}</b>
 
-🎮 بازی‌های تمام‌شده: <b>{games}</b>
+🎮 بازی‌های تمام‌شده (همهٔ دوره‌ها): <b>{games}</b>
 🏆 برد: <b>{wins}</b>   |   🤝 مساوی: <b>{draws}</b>   |   🌧 باخت: <b>{losses}</b>
 
-⭐ مجموع امتیاز ذخیره‌شده: <b>{points}</b>
+⭐ امتیاز ماه جاری: <b>{points}</b>
 
 🌸 آمار گل یا پوچ
 🎯 حدس درست: <b>{correct}</b>   |   🌀 حدس اشتباه: <b>{wrong}</b>
@@ -425,9 +429,11 @@ def leaderboard_text(
         lines.extend(
             [
                 "",
-                f"📍 جایگاه تو ({escape(current_player.display_name)}): "
-                f"<b>رتبهٔ {current_player.rank}</b> — "
-                f"⭐ {current_player.points_won} امتیاز",
+                (
+                    f"📍 جایگاه تو ({escape(current_player.display_name)}): "
+                    f"<b>رتبهٔ {current_player.rank}</b> — "
+                    f"⭐ {current_player.points_won} امتیاز"
+                ),
             ]
         )
     return "\n".join(lines)

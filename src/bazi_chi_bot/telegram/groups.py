@@ -90,12 +90,17 @@ def session_card(
     )
     if len(ranked) > 12:
         scores += f"\n… و {len(ranked) - 12} نفر دیگر"
+    unit = (
+        "دور"
+        if session.game_type in (GameType.WORD_GUESS, GameType.MASTERMIND, GameType.TRUTH_OR_DARE)
+        else "دست"
+    )
     text = (
         f"🏆 <b>مسابقهٔ گروهی #{session.id}</b> | {title}\n"
         f"👥 {len(session.players)} بازیکن"
         + (
             " | چالش پایانی" if session.phase.startswith("final_") else
-            f" | دور {session.current_round} از {session.total_rounds}"
+            f" | {unit} {session.current_round} از {session.total_rounds}"
             if session.status == "active" else ""
         )
         + f"\n\n<b>امتیازها</b>\n{scores}"
