@@ -55,10 +55,23 @@ class DailyChallengeWorker:
         # next schedule reconciliation indefinitely.
         deferred: set[tuple[str, int, str]] = set()
         for _ in range(100):
-            item = await self.service.next_notification(deferred)
+            item = await self.service.next_notification(
+                deferred, getattr(self.bot, "platform", "telegram")
+            )
             if item is None:
                 return
             day, user_id, event = item
+            accepts_id = getattr(self.bot, "accepts_domain_id", lambda value: value >= 0)
+            identity_resolver = getattr(self.bot, "identity_resolver", None)
+            has_platform_identity = accepts_id(user_id)
+            if not has_platform_identity and identity_resolver is not None:
+                has_platform_identity = (
+                    await identity_resolver(user_id, getattr(self.bot, "platform", "telegram"))
+                    is not None
+                )
+            if not has_platform_identity:
+                deferred.add(item)
+                continue
             _, end = challenge_window(date.fromisoformat(day))
             if event == "start" and int(time.time()) >= end:
                 await self.service.record_notification(day, user_id, event)

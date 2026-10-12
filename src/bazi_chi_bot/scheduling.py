@@ -14,13 +14,13 @@ FINAL_COUNTDOWN_TEXT = (
 
 
 def parse_admin_ids(value: str) -> frozenset[int]:
-    """Parse a comma-separated ADMIN_TELEGRAM_IDS setting."""
+    """Parse a comma-separated TELEGRAM_ADMIN_IDS setting."""
     if not value.strip():
         return frozenset()
     try:
         return frozenset(int(part.strip()) for part in value.split(",") if part.strip())
     except ValueError as error:
-        raise ValueError("ADMIN_TELEGRAM_IDS must contain comma-separated integers") from error
+        raise ValueError("TELEGRAM_ADMIN_IDS must contain comma-separated integers") from error
 
 
 def parse_target_datetime(value: str, timezone_name: str) -> datetime:

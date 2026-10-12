@@ -71,7 +71,12 @@ def register_handlers(
             )
             if game is not None:
                 if game.status is GameStatus.FINISHED:
-                    text += "\n\n✅ بازی امروزت تمام شده و تلاش دیگری نداری."
+                    outcome = (
+                        "🏆 بردی و امتیازت ثبت شد."
+                        if game.winner_id == user_id
+                        else "🌤 باختی؛ امتیاز امروز را نگرفتی."
+                    )
+                    text += f"\n\n✅ بازی امروزت تمام شده و تلاش دیگری نداری. {outcome}"
                 elif game.status is GameStatus.ACTIVE:
                     text += "\n\n🔄 بازی امروزت شروع شده؛ از همان‌جا ادامه بده."
                 else:

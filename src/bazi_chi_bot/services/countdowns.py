@@ -142,13 +142,24 @@ class CountdownService:
             ).fetchone()
         return _countdown_from_row(row), replaced_existing
 
-    async def next_due(self) -> Countdown | None:
+    async def next_due(self, platform: str | None = None) -> Countdown | None:
+        platform_clause = ""
+        if platform == "telegram":
+            platform_clause = (
+                " AND EXISTS (SELECT 1 FROM user_platforms up "
+                "WHERE up.user_id = countdowns.target_user_id AND up.platform = 'telegram')"
+            )
+        elif platform == "bale":
+            platform_clause = (
+                " AND EXISTS (SELECT 1 FROM user_platforms up "
+                "WHERE up.user_id = countdowns.target_user_id AND up.platform = 'bale')"
+            )
         async with self.database.connect() as connection:
             row = await (
                 await connection.execute(
-                    """
+                    f"""
                     SELECT * FROM countdowns
-                    WHERE status = 'active'
+                    WHERE status = 'active'{platform_clause}
                     ORDER BY next_run_at, id
                     LIMIT 1
                     """

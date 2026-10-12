@@ -97,6 +97,7 @@ def register_handlers(
     service: GameService,
     *,
     admin_ids: frozenset[int] = frozenset(),
+    platform: str = "telegram",
 ) -> None:
     presenter = GamePresenter(service)
     send_game_view = presenter.send_game_view
@@ -168,7 +169,11 @@ def register_handlers(
     async def new_game(callback: CallbackQuery) -> None:
         await service.save_user(telegram_user(callback.from_user))
         user = await service.get_user(callback.from_user.id)
-        if user is not None and not user.is_activated and callback.from_user.id not in admin_ids:
+        if (
+            user is not None
+            and not user.is_platform_activated(platform)
+            and callback.from_user.id not in admin_ids
+        ):
             await safe_edit(
                 callback,
                 "🤖 <b>بازی‌های رایگان با ربات</b>\n\n"

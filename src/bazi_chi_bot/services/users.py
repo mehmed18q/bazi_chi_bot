@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import secrets
 import time
+
+import aiosqlite
 
 from ..db import Database
 from ..leaderboard import leaderboard_period_start_epoch
@@ -19,6 +22,357 @@ class UserService:
         now = int(time.time())
         async with self.database.transaction() as connection:
             await self._save_user(connection, user, now)
+
+    async def resolve_platform_user(self, platform: str, external_id: int) -> int:
+        """Return the canonical shared-account ID for a platform identity.
+
+        The first update from a new platform is registered immediately.  This
+        lets the normal handlers continue using their existing integer user ID
+        API while a later account-link flow can merge that temporary row into
+        an already active account.
+        """
+        if platform not in {"telegram", "bale"}:
+            raise ValueError("Unknown platform")
+        domain_id = external_id if platform == "telegram" else -(external_id + 2)
+        now = int(time.time())
+        async with self.database.transaction() as connection:
+            row = await (
+                await connection.execute(
+                    "SELECT user_id FROM user_platforms WHERE platform = ? AND external_id = ?",
+                    (platform, external_id),
+                )
+            ).fetchone()
+            if row is not None:
+                return int(row["user_id"])
+            await connection.execute(
+                """
+                INSERT OR IGNORE INTO user_platforms
+                    (user_id, platform, external_id, linked_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (domain_id, platform, external_id, now),
+            )
+        return domain_id
+
+    async def platform_external_id(self, user_id: int, platform: str) -> int | None:
+        async with self.database.connect() as connection:
+            row = await (
+                await connection.execute(
+                    "SELECT external_id FROM user_platforms WHERE user_id = ? AND platform = ?",
+                    (user_id, platform),
+                )
+            ).fetchone()
+        return int(row["external_id"]) if row is not None else None
+
+    async def platforms_for_user(self, user_id: int) -> tuple[tuple[str, int], ...]:
+        """Return every messenger identity attached to a canonical account."""
+        async with self.database.connect() as connection:
+            rows = await (
+                await connection.execute(
+                    """
+                    SELECT platform, external_id
+                    FROM user_platforms
+                    WHERE user_id = ?
+                    ORDER BY platform
+                    """,
+                    (user_id,),
+                )
+            ).fetchall()
+        return tuple((str(row["platform"]), int(row["external_id"])) for row in rows)
+
+    async def create_account_link_token(
+        self, user_id: int, target_platform: str, *, ttl_seconds: int = 15 * 60
+    ) -> str:
+        if target_platform not in {"telegram", "bale"}:
+            raise ValueError("Unknown platform")
+        now = int(time.time())
+        token = secrets.token_urlsafe(24)
+        async with self.database.transaction() as connection:
+            exists = await (
+                await connection.execute(
+                    "SELECT 1 FROM users WHERE telegram_id = ?", (user_id,)
+                )
+            ).fetchone()
+            if exists is None:
+                raise ValueError("User is not registered")
+            await connection.execute(
+                """
+                DELETE FROM account_link_tokens
+                WHERE user_id = ? AND target_platform = ?
+                  AND (used_at IS NOT NULL OR expires_at <= ?)
+                """,
+                (user_id, target_platform, now),
+            )
+            await connection.execute(
+                """
+                INSERT INTO account_link_tokens
+                    (token, user_id, target_platform, created_at, expires_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (token, user_id, target_platform, now, now + ttl_seconds),
+            )
+        return token
+
+    async def link_platform_account(
+        self,
+        current_user_id: int,
+        token: str,
+        platform: str | None = None,
+    ) -> int | None:
+        """Consume a link token and merge the current platform into its owner."""
+        if platform is not None and platform not in {"telegram", "bale"}:
+            raise ValueError("Unknown platform")
+        now = int(time.time())
+        async with self.database.transaction() as connection:
+            token_row = await (
+                await connection.execute(
+                    """
+                    SELECT * FROM account_link_tokens
+                    WHERE token = ? AND used_at IS NULL AND expires_at > ?
+                    """,
+                    (token, now),
+                )
+            ).fetchone()
+            if token_row is None or (
+                platform is not None and token_row["target_platform"] != platform
+            ):
+                return None
+            owner_id = int(token_row["user_id"])
+            if owner_id != current_user_id:
+                await self._merge_users(connection, owner_id, current_user_id)
+            await connection.execute(
+                "UPDATE account_link_tokens SET used_at = ? WHERE token = ?",
+                (now, token),
+            )
+            return owner_id
+
+    @staticmethod
+    async def _merge_users(connection, owner_id: int, duplicate_id: int) -> None:
+        """Move references from a newly-created duplicate row to the owner.
+
+        The duplicate is normally an empty row created by ``/start`` on the
+        second messenger.  Foreign-key metadata keeps this list resilient as
+        new game tables are added; a rare uniqueness collision is resolved by
+        dropping the duplicate row's conflicting record.
+        """
+        if owner_id == duplicate_id:
+            return
+        owner = await (
+            await connection.execute(
+                "SELECT 1 FROM users WHERE telegram_id = ?", (owner_id,)
+            )
+        ).fetchone()
+        duplicate = await (
+            await connection.execute(
+                "SELECT 1 FROM users WHERE telegram_id = ?", (duplicate_id,)
+            )
+        ).fetchone()
+        if owner is None or duplicate is None:
+            raise ValueError("Both linked users must be registered")
+
+        owner_details = await (
+            await connection.execute(
+                "SELECT * FROM users WHERE telegram_id = ?", (owner_id,)
+            )
+        ).fetchone()
+        duplicate_details = await (
+            await connection.execute(
+                "SELECT * FROM users WHERE telegram_id = ?", (duplicate_id,)
+            )
+        ).fetchone()
+        # Account-level state belongs to the canonical row as well.  In
+        # particular, linking an already-paid account must not remove its
+        # activation when the other messenger was registered first.
+        owner_custom_nickname = bool(owner_details["nickname_is_custom"])
+        duplicate_custom_nickname = bool(duplicate_details["nickname_is_custom"])
+        nickname = (
+            owner_details["nickname"]
+            if owner_custom_nickname
+            else duplicate_details["nickname"]
+            if duplicate_custom_nickname
+            else owner_details["nickname"]
+        )
+        await connection.execute(
+            """
+            UPDATE users
+            SET telegram_activated = CASE
+                    WHEN telegram_activated = 1 OR ? = 1 THEN 1 ELSE 0 END,
+                bale_activated = CASE
+                    WHEN bale_activated = 1 OR ? = 1 THEN 1 ELSE 0 END,
+                is_activated = CASE WHEN is_activated = 1 OR ? = 1 THEN 1 ELSE 0 END,
+                activation_approved_at = COALESCE(activation_approved_at, ?),
+                activation_approved_by = COALESCE(activation_approved_by, ?),
+                pending_invite_token = COALESCE(pending_invite_token, ?),
+                profile_photo_file_id = COALESCE(profile_photo_file_id, ?),
+                nickname = ?,
+                nickname_is_custom = CASE WHEN ? = 1 OR ? = 1 THEN 1 ELSE 0 END,
+                referral_unlocked_at = CASE
+                    WHEN referral_unlocked_at IS NULL THEN ?
+                    WHEN ? IS NULL OR referral_unlocked_at >= ? THEN referral_unlocked_at
+                    ELSE ? END,
+                referral_unlock_notified_at = CASE
+                    WHEN referral_unlock_notified_at IS NULL THEN ?
+                    WHEN ? IS NULL OR referral_unlock_notified_at >= ?
+                        THEN referral_unlock_notified_at
+                    ELSE ? END,
+                premium_revoked_by_admin = CASE
+                    WHEN premium_revoked_by_admin = 1 OR ? = 1 THEN 1 ELSE 0 END,
+                updated_at = MAX(updated_at, ?)
+            WHERE telegram_id = ?
+            """,
+            (
+                int(duplicate_details["telegram_activated"]),
+                int(duplicate_details["bale_activated"]),
+                int(duplicate_details["is_activated"]),
+                duplicate_details["activation_approved_at"],
+                duplicate_details["activation_approved_by"],
+                duplicate_details["pending_invite_token"],
+                duplicate_details["profile_photo_file_id"],
+                nickname,
+                int(owner_custom_nickname),
+                int(duplicate_custom_nickname),
+                duplicate_details["referral_unlocked_at"],
+                duplicate_details["referral_unlocked_at"],
+                owner_details["referral_unlocked_at"],
+                duplicate_details["referral_unlocked_at"],
+                duplicate_details["referral_unlock_notified_at"],
+                duplicate_details["referral_unlock_notified_at"],
+                owner_details["referral_unlock_notified_at"],
+                duplicate_details["referral_unlock_notified_at"],
+                int(duplicate_details["premium_revoked_by_admin"]),
+                max(int(owner_details["updated_at"]), int(duplicate_details["updated_at"])),
+                owner_id,
+            ),
+        )
+        # Receipts keep a denormalized copy of the internal payment ID.  Once
+        # the duplicate account is removed, point its historical receipts at
+        # the canonical account's ID too.
+        await connection.execute(
+            """
+            UPDATE payment_receipts
+            SET user_internal_id = (SELECT id FROM users WHERE telegram_id = ?)
+            WHERE user_telegram_id = ?
+            """,
+            (owner_id, duplicate_id),
+        )
+        await connection.execute(
+            """UPDATE users
+               SET referral_primary_platform = COALESCE(referral_primary_platform, ?),
+                   referral_first_unlocked_at = CASE
+                       WHEN referral_first_unlocked_at IS NULL THEN ?
+                       WHEN ? IS NULL OR referral_first_unlocked_at >= ?
+                           THEN referral_first_unlocked_at ELSE ? END,
+                   referral_second_unlocked_at = CASE
+                       WHEN referral_second_unlocked_at IS NULL THEN ?
+                       WHEN ? IS NULL OR referral_second_unlocked_at >= ?
+                           THEN referral_second_unlocked_at ELSE ? END
+               WHERE telegram_id = ?""",
+            (
+                duplicate_details["referral_primary_platform"],
+                duplicate_details["referral_first_unlocked_at"],
+                duplicate_details["referral_first_unlocked_at"],
+                owner_details["referral_first_unlocked_at"],
+                duplicate_details["referral_first_unlocked_at"],
+                duplicate_details["referral_second_unlocked_at"],
+                duplicate_details["referral_second_unlocked_at"],
+                owner_details["referral_second_unlocked_at"],
+                duplicate_details["referral_second_unlocked_at"],
+                owner_id,
+            ),
+        )
+
+        # Totals are kept in user_stats while immutable score events are moved
+        # below.  Adding the counters first preserves all-time statistics.
+        await connection.execute(
+            """
+            UPDATE user_stats AS target
+            SET games_played = target.games_played + source.games_played,
+                wins = target.wins + source.wins,
+                losses = target.losses + source.losses,
+                correct_guesses = target.correct_guesses + source.correct_guesses,
+                wrong_guesses = target.wrong_guesses + source.wrong_guesses,
+                points_won = target.points_won + source.points_won
+            FROM user_stats AS source
+            WHERE target.telegram_id = ? AND source.telegram_id = ?
+            """,
+            (owner_id, duplicate_id),
+        )
+        await connection.execute("DELETE FROM user_stats WHERE telegram_id = ?", (duplicate_id,))
+
+        tables = await (
+            await connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
+            )
+        ).fetchall()
+        references: list[tuple[str, str]] = []
+        for table_row in tables:
+            table = str(table_row["name"])
+            foreign_keys = await connection.execute(f"PRAGMA foreign_key_list({table})")
+            for foreign_key in await foreign_keys.fetchall():
+                if foreign_key["table"] == "users":
+                    references.append((table, str(foreign_key["from"])))
+
+        # Score history is intentionally immutable during normal operation.
+        # Account linking is the one controlled maintenance operation that
+        # needs to move those rows to the canonical user.  DDL is transactional
+        # in SQLite, so the triggers are restored if anything below fails.
+        await connection.execute("DROP TRIGGER IF EXISTS score_event_no_update")
+        await connection.execute("DROP TRIGGER IF EXISTS score_event_no_delete")
+        try:
+            for table, column in references:
+                if table == "user_stats":
+                    continue
+                try:
+                    await connection.execute(
+                        f"UPDATE {table} SET {column} = ? WHERE {column} = ?",
+                        (owner_id, duplicate_id),
+                    )
+                except aiosqlite.IntegrityError:
+                    # Composite/unique indexes can collide when both sides
+                    # used the same feature.  Keep the owner-side record and
+                    # discard only the duplicate-side rows for that feature.
+                    await connection.execute(
+                        f"DELETE FROM {table} WHERE {column} = ?", (duplicate_id,)
+                    )
+        finally:
+            await connection.execute(
+                """
+                CREATE TRIGGER IF NOT EXISTS score_event_no_update BEFORE UPDATE ON score_events
+                BEGIN
+                    SELECT RAISE(ABORT, 'Score events are immutable');
+                END
+                """
+            )
+            await connection.execute(
+                """
+                CREATE TRIGGER IF NOT EXISTS score_event_no_delete BEFORE DELETE ON score_events
+                BEGIN
+                    SELECT RAISE(ABORT, 'Score events are immutable');
+                END
+                """
+            )
+
+        await connection.execute(
+            """
+            DELETE FROM user_platforms
+            WHERE user_id = ?
+              AND EXISTS (
+                  SELECT 1 FROM user_platforms owner_platform
+                  WHERE owner_platform.user_id = ?
+                    AND owner_platform.platform = user_platforms.platform
+              )
+            """,
+            (duplicate_id, owner_id),
+        )
+        await connection.execute(
+            "UPDATE user_platforms SET user_id = ? WHERE user_id = ?",
+            (owner_id, duplicate_id),
+        )
+        await connection.execute(
+            "UPDATE account_link_tokens SET user_id = ? WHERE user_id = ?",
+            (owner_id, duplicate_id),
+        )
+        await connection.execute("DELETE FROM users WHERE telegram_id = ?", (duplicate_id,))
 
     async def register_entry(self, user: User, *, activation_exempt: bool = False) -> None:
         """Save a user and award the monthly login point only after activation."""
@@ -107,6 +461,17 @@ class UserService:
             "INSERT OR IGNORE INTO user_stats (telegram_id) VALUES (?)",
             (user.telegram_id,),
         )
+        if user.telegram_id != -1:
+            platform = "bale" if user.telegram_id <= -2 else "telegram"
+            external_id = -user.telegram_id - 2 if platform == "bale" else user.telegram_id
+            await connection.execute(
+                """
+                INSERT OR IGNORE INTO user_platforms
+                    (user_id, platform, external_id, linked_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (user.telegram_id, platform, external_id, now),
+            )
 
     async def get_user(self, telegram_id: int) -> User | None:
         async with self.database.connect() as connection:
@@ -159,7 +524,9 @@ class UserService:
     async def all_users(self) -> list[User]:
         async with self.database.connect() as connection:
             rows = await (
-                await connection.execute("SELECT * FROM users WHERE telegram_id != -1 ORDER BY updated_at DESC")
+                await connection.execute(
+                    "SELECT * FROM users WHERE telegram_id != -1 ORDER BY updated_at DESC"
+                )
             ).fetchall()
         return [_user_from_row(row) for row in rows]
 

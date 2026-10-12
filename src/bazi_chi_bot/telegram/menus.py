@@ -10,7 +10,7 @@ from aiogram.enums import ChatMemberStatus, ChatType
 from aiogram.exceptions import TelegramAPIError
 from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from ..game import (
     GameError,
@@ -32,6 +32,7 @@ from .keyboards import (
     admin_menu_keyboard,
     admin_user_actions,
     admin_users_keyboard,
+    platform_link_url,
     profile_name_keyboard,
     sponsor_admin_keyboard,
     sponsor_kind_keyboard,
@@ -60,6 +61,7 @@ def register_handlers(
     service: GameService,
     *,
     countdown_admin_ids: frozenset[int] = frozenset(),
+    platform: str = "telegram",
 ) -> None:
     presenter = GamePresenter(service)
     send_game_view = presenter.send_game_view
@@ -72,7 +74,9 @@ def register_handlers(
 
     async def has_premium(user_id: int) -> bool:
         user = await service.get_user(user_id)
-        return is_countdown_admin(user_id) or bool(user and user.is_activated)
+        return is_countdown_admin(user_id) or bool(
+            user and user.is_platform_activated(platform)
+        )
 
     async def visible_games(user_id: int):
         if await has_premium(user_id):
@@ -85,17 +89,27 @@ def register_handlers(
             user_id, solo_only=not await has_premium(user_id)
         )
 
-    def admin_profile_text(user, stats) -> str:
+    def admin_profile_text(user, stats, platforms: tuple[tuple[str, int], ...] = ()) -> str:
         username = f"@{user.username}" if user.username else "ندارد"
         telegram_name = user.telegram_display_name or user.display_name
+        platform_labels = {
+            "telegram": "تلگرام",
+            "bale": "بله",
+        }
+        connected = "، ".join(
+            f"{platform_labels.get(platform, platform)} (<code>{external_id}</code>)"
+            for platform, external_id in platforms
+        ) or "ثبت نشده"
         return (
             "👤 <b>پروندهٔ کاربر</b>\n\n"
             f"نام در ربات: <b>{escape(user.display_name)}</b>\n"
-            f"نام تلگرام: <b>{escape(telegram_name)}</b>\n"
+            f"نام حساب پیام‌رسان: <b>{escape(telegram_name)}</b>\n"
             f"یوزرنیم: <code>{escape(username)}</code>\n"
             f"شناسهٔ داخلی: <code>{user.id if user.id is not None else '—'}</code>\n"
-            f"شناسهٔ تلگرام: <code>{user.telegram_id}</code>\n"
-            f"اشتراک ویژه: <b>{'فعال ✅' if user.is_activated else 'ندارد 🔒'}</b>\n\n"
+            f"شناسهٔ کاربر: <code>{user.telegram_id}</code>\n"
+            f"پیام‌رسان‌های متصل: {connected}\n"
+            f"اشتراک تلگرام: <b>{'فعال ✅' if user.telegram_activated else 'ندارد 🔒'}</b>\n"
+            f"اشتراک بله: <b>{'فعال ✅' if user.bale_activated else 'ندارد 🔒'}</b>\n\n"
             f"بازی‌ها (همهٔ دوره‌ها): {stats.games_played}\n"
             f"برد (همهٔ دوره‌ها): {stats.wins}\n"
             f"امتیاز ماه جاری: {stats.points_won}"
@@ -168,8 +182,14 @@ def register_handlers(
             await callback.answer("کاربر پیدا نشد.", show_alert=True)
             return
         stats = await service.get_stats(uid)
-        text = admin_profile_text(user, stats)
-        photo_file_id = user.profile_photo_file_id
+        text = admin_profile_text(user, stats, await service.platforms_for_user(uid))
+        # File IDs are scoped to a messenger; Telegram's ID cannot be sent by
+        # the Bale API.  Bale does not document getUserProfilePhotos either.
+        photo_file_id = (
+            None
+            if getattr(bot, "platform", "telegram") == "bale"
+            else user.profile_photo_file_id
+        )
         if photo_file_id is None:
             photo_file_id = await refresh_profile_photo(service, bot, uid)
         if photo_file_id is not None:
@@ -207,7 +227,7 @@ def register_handlers(
             await callback.answer("کاربر پیدا نشد.", show_alert=True)
             return
         stats = await service.get_stats(uid)
-        text = admin_profile_text(user, stats)
+        text = admin_profile_text(user, stats, await service.platforms_for_user(uid))
         keyboard = admin_user_actions(uid, user.is_activated)
         if callback.message is not None and getattr(callback.message, "photo", None):
             await callback.message.edit_caption(caption=text, reply_markup=keyboard)
@@ -383,16 +403,87 @@ def register_handlers(
             reply_markup=sponsor_admin_keyboard(await service.all_sponsors()),
         )
 
+    @router.callback_query(F.data.startswith("account_link:"))
+    async def account_link(callback: CallbackQuery, bot: Bot) -> None:
+        target_platform = (callback.data or "").rsplit(":", 1)[-1]
+        current_platform = getattr(bot, "platform", "telegram")
+        if target_platform not in {"telegram", "bale"} or target_platform == current_platform:
+            await callback.answer("این بازو همین حالا باز است.", show_alert=True)
+            return
+        try:
+            token = await service.create_account_link_token(
+                callback.from_user.id, target_platform
+            )
+        except ValueError:
+            await callback.answer("ابتدا /start را بزن و دوباره تلاش کن.", show_alert=True)
+            return
+        url = platform_link_url(target_platform, token)
+        if not url:
+            await callback.answer("بازوی مقصد هنوز تنظیم نشده است.", show_alert=True)
+            return
+        label = (
+            "🟦 بازکردن و اتصال در بله"
+            if target_platform == "bale"
+            else "✈️ بازکردن و اتصال در تلگرام"
+        )
+        keyboard = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text=label, url=url)],
+                [InlineKeyboardButton(text="🏠 منوی اصلی", callback_data="menu:home")],
+            ]
+        )
+        await safe_edit(
+            callback,
+            "🔗 <b>اتصال دو پیام‌رسان</b>\n\n"
+            "این لینک را فقط خودت باز کن. با بازکردن آن، حساب فعلی‌ات به بازوی مقصد وصل می‌شود؛ "
+            "لینک تا ۱۵ دقیقه و فقط یک‌بار معتبر است.",
+            keyboard,
+        )
+        await callback.answer()
+
     @router.message(CommandStart())
     async def start(message: Message, command: CommandObject, bot: Bot, state: FSMContext) -> None:
         if message.from_user is None:
             return
         await state.clear()
         user = telegram_user(message.from_user)
+        current_platform = getattr(bot, "platform", "telegram")
         admin = is_countdown_admin(user.telegram_id)
         await service.register_user_entry(user, activation_exempt=admin)
+        await service.referrals.set_primary_platform(user.telegram_id, current_platform)
         await refresh_profile_photo(service, bot, user.telegram_id)
         payload = command.args or ""
+        if payload.startswith("link_"):
+            try:
+                owner_id = await service.link_platform_account(
+                    user.telegram_id, payload.removeprefix("link_"), current_platform
+                )
+            except (IntegrityError, ValueError):
+                await message.answer(
+                    "اتصال انجام نشد؛ این دو حساب سابقهٔ ناسازگاری دارند. "
+                    "از حساب اصلی یک لینک تازه بگیر یا با پشتیبانی تماس بگیر."
+                )
+                return
+            if owner_id is None:
+                await message.answer(
+                    "این لینک اتصال منقضی شده یا قبلاً استفاده شده است؛ "
+                    "از منوی حساب اصلی یک لینک تازه بگیر."
+                )
+                return
+            linked_user = await service.get_user(owner_id)
+            if linked_user is None:
+                await message.answer("اتصال حساب انجام نشد؛ دوباره از منوی اصلی تلاش کن.")
+                return
+            user = linked_user
+            admin = is_countdown_admin(user.telegram_id)
+            await refresh_profile_photo(service, bot, user.telegram_id)
+            await message.answer(
+                "✅ <b>حساب‌ها با موفقیت متصل شدند.</b>\n\n"
+                "بازی‌ها، امتیازها و حساب کاربری مشترک شدند؛ وضعیت فعال‌سازی هر پیام‌رسان "
+                "جداگانه حفظ می‌شود و هر پرداخت فقط دامنهٔ انتخاب‌شده را فعال می‌کند.",
+                reply_markup=main_menu(user.telegram_id),
+            )
+            return
         if payload.startswith("ref_"):
             await service.referrals.claim_code(user.telegram_id, payload.removeprefix("ref_"))
             payload = ""
@@ -420,7 +511,7 @@ def register_handlers(
             payload = ""
         await deliver_referral_notices(message, service)
         referral_status = await referral_status_text(
-            service, user.telegram_id, await has_premium(user.telegram_id)
+            service, user.telegram_id, await has_premium(user.telegram_id), platform
         )
         persisted_user = await service.get_user(user.telegram_id)
         invite_token = payload.removeprefix("join_") if payload.startswith("join_") else ""
@@ -435,7 +526,7 @@ def register_handlers(
                 reply_markup=main_menu(user.telegram_id),
             )
             await message.answer(
-                await activation_gate_text(service, persisted_user),
+                await activation_gate_text(service, persisted_user, platform),
                 reply_markup=activation_keyboard(),
             )
             return
@@ -520,7 +611,7 @@ def register_handlers(
 
         payload = (callback.data or "").removeprefix("sponsors:check:")
         if payload.startswith("join_") and not await has_premium(callback.from_user.id):
-            await show_activation_gate(callback, service)
+            await show_activation_gate(callback, service, bot)
             return
         if payload.startswith("join_"):
             user = telegram_user(callback.from_user)
@@ -760,10 +851,10 @@ def register_handlers(
             return
         await safe_edit(
             callback,
-            "✅ نام نمایشی به نام حساب تلگرام برگشت.\n\n" + profile_name_text(user),
+            "✅ نام نمایشی به نام حساب پیام‌رسان برگشت.\n\n" + profile_name_text(user),
             profile_name_keyboard(False),
         )
-        await callback.answer("نام تلگرام فعال شد. ✅")
+        await callback.answer("نام حساب پیام‌رسان فعال شد. ✅")
 
     @router.callback_query(F.data == "menu:stats")
     async def menu_stats(callback: CallbackQuery) -> None:

@@ -16,6 +16,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from ..game import GameService
 from ..models import GameType
 from ..services.group_games import GroupSession, GroupSessionError
+from .platform import PlatformIdentityMiddleware, PlatformName
 from .shared import safe_edit, telegram_user
 from .sponsors import check_sponsors
 
@@ -80,8 +81,11 @@ def _private_instruction(session: GroupSession) -> str:
 
 
 def session_card(
-    session: GroupSession, bot_username: str | None = None
+    session: GroupSession,
+    bot_username: str | None = None,
+    platform: PlatformName = "telegram",
 ) -> tuple[str, object]:
+    base = "https://ble.ir" if platform == "bale" else "https://t.me"
     title = next(label for kind, label in GROUP_TYPES.values() if kind is session.game_type)
     ranked = sorted(session.players, key=lambda p: (-p.score, p.joined_at, p.user_id))
     scores = "\n".join(
@@ -120,7 +124,7 @@ def session_card(
         if bot_username:
             builder.button(
                 text="📩 ورود به ربات و ثبت دعوت",
-                url=f"https://t.me/{bot_username}?start=group_{session.id}",
+                url=f"{base}/{bot_username}?start=group_{session.id}",
             )
     elif session.status == "active":
         move = f"grp:move:{session.id}:{session.current_round}:"
@@ -199,7 +203,7 @@ def session_card(
             if bot_username:
                 builder.button(
                     text="📩 باز کردن خصوصی ربات",
-                    url=f"https://t.me/{bot_username}?start=group_{session.id}",
+                    url=f"{base}/{bot_username}?start=group_{session.id}",
                 )
         else:
             role = _name(session, session.role_id)
@@ -245,7 +249,7 @@ def session_card(
 
 async def refresh_session_card(service: GameService, bot: Bot, session: GroupSession) -> None:
     me = await bot.get_me()
-    text, keyboard = session_card(session, me.username)
+    text, keyboard = session_card(session, me.username, getattr(bot, "platform", "telegram"))
     try:
         await bot.edit_message_text(
             text, chat_id=session.chat_id, message_id=session.message_id,
@@ -282,11 +286,18 @@ def register_private_handlers(router: Router, service: GameService) -> None:
 
 
 def build_group_router(
-    service: GameService, *, admin_ids: frozenset[int] = frozenset()
+    service: GameService,
+    *,
+    admin_ids: frozenset[int] = frozenset(),
+    platform: PlatformName = "telegram",
 ) -> Router:
     router = Router(name="group_games")
     router.message.filter(F.chat.type.in_(GROUP_CHAT_TYPES))
     router.callback_query.filter(F.message.chat.type.in_(GROUP_CHAT_TYPES))
+    identity_middleware = PlatformIdentityMiddleware(platform, service)
+    router.message.middleware(identity_middleware)
+    router.callback_query.middleware(identity_middleware)
+    router.my_chat_member.middleware(identity_middleware)
 
     @router.my_chat_member()
     async def bot_added_to_group(event: ChatMemberUpdated, bot: Bot) -> None:
@@ -302,7 +313,10 @@ def build_group_router(
             return
         actor = event.from_user
         account = await service.get_user(actor.id) if actor and not actor.is_bot else None
-        if actor is None or (actor.id not in admin_ids and (account is None or not account.is_activated)):
+        if actor is None or (
+            actor.id not in admin_ids
+            and (account is None or not account.is_platform_activated(platform))
+        ):
             try:
                 await bot.send_message(
                     event.chat.id,
@@ -317,7 +331,11 @@ def build_group_router(
         builder = InlineKeyboardBuilder()
         builder.button(
             text="👥 ورود به بازی‌چی",
-            url=f"https://t.me/{bot_user.username}?start=grpchat_{event.chat.id}",
+            url=(
+                f"https://ble.ir/{bot_user.username}?start=grpchat_{event.chat.id}"
+                if platform == "bale"
+                else f"https://t.me/{bot_user.username}?start=grpchat_{event.chat.id}"
+            ),
         )
         try:
             await bot.send_message(
@@ -331,7 +349,9 @@ def build_group_router(
 
     async def allowed(callback: CallbackQuery, bot: Bot) -> bool:
         account = await service.get_user(callback.from_user.id)
-        if account is None or (not account.is_activated and account.telegram_id not in admin_ids):
+        if account is None or (
+            not account.is_platform_activated(platform) and account.telegram_id not in admin_ids
+        ):
             await callback.answer("برای مسابقهٔ گروهی به اشتراک ویژه نیاز داری؛ ربات را در خصوصی باز کن.", show_alert=True)
             return False
         sponsors = await service.active_sponsors()
@@ -359,7 +379,9 @@ def build_group_router(
 
     async def show(callback: CallbackQuery, bot: Bot, session: GroupSession) -> None:
         username = (await bot.get_me()).username
-        text, keyboard = session_card(session, username)
+        text, keyboard = session_card(
+            session, username, getattr(bot, "platform", "telegram")
+        )
         await safe_edit(callback, text, keyboard)
 
     @router.message(Command("play"))
@@ -367,7 +389,9 @@ def build_group_router(
         if message.from_user is None or message.from_user.is_bot:
             return
         account = await service.get_user(message.from_user.id)
-        if message.from_user.id not in admin_ids and (account is None or not account.is_activated):
+        if message.from_user.id not in admin_ids and (
+            account is None or not account.is_platform_activated(platform)
+        ):
             await message.answer("⭐ مسابقهٔ گروهی ویژهٔ مشترکان است. برای خرید، ربات را در خصوصی باز کن.")
             return
         existing = await service.group_games.active_in_chat(message.chat.id)
@@ -396,7 +420,9 @@ def build_group_router(
             await message.answer("این مسابقه در این گروه نیست.")
             return
         account = await service.get_user(message.from_user.id)
-        if message.from_user.id not in admin_ids and (account is None or not account.is_activated):
+        if message.from_user.id not in admin_ids and (
+            account is None or not account.is_platform_activated(platform)
+        ):
             await message.answer("برای مسابقهٔ گروهی به اشتراک ویژه نیاز داری.")
             return
         if message.from_user.id not in admin_ids:
@@ -422,7 +448,9 @@ def build_group_router(
         if text.startswith("/") or not mentions_bot_name(text):
             return
         account = await service.get_user(message.from_user.id)
-        if message.from_user.id not in admin_ids and (account is None or not account.is_activated):
+        if message.from_user.id not in admin_ids and (
+            account is None or not account.is_platform_activated(platform)
+        ):
             await message.answer("👋 من اینجام! مسابقهٔ گروهی با اشتراک ویژه باز می‌شود؛ در خصوصی ربات اشتراکت را فعال کن. ⭐")
             return
         existing = await service.group_games.active_in_chat(message.chat.id)

@@ -49,6 +49,13 @@ class PaymentReceiptStatus(StrEnum):
     REJECTED = "rejected"
 
 
+class ActivationScope(StrEnum):
+    """The platforms a purchase is intended to unlock."""
+
+    CURRENT = "current"
+    BOTH = "both"
+
+
 @dataclass(frozen=True, slots=True)
 class User:
     telegram_id: int
@@ -65,6 +72,15 @@ class User:
     nickname: str | None = None
     nickname_is_custom: bool = False
     telegram_display_name: str | None = None
+    telegram_activated: bool = False
+    bale_activated: bool = False
+
+    def is_platform_activated(self, platform: str) -> bool:
+        if platform == "telegram":
+            return self.telegram_activated
+        if platform == "bale":
+            return self.bale_activated
+        raise ValueError(f"Unknown platform: {platform}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,6 +90,8 @@ class PaymentSettings:
     card_holder: str
     updated_at: int
     updated_by: int | None
+    bale_payment_enabled: bool = True
+    bale_provider_token_configured: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,6 +107,8 @@ class PaymentReceipt:
     submitted_at: int
     reviewed_at: int | None
     reviewed_by: int | None
+    activation_scope: str = "telegram"
+    platform: str = "telegram"
 
 
 @dataclass(frozen=True, slots=True)

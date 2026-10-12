@@ -1253,4 +1253,95 @@ MIGRATIONS: tuple[str, ...] = (
     """
     ALTER TABLE tournaments ADD COLUMN hand_counts_json TEXT;
     """,
+    """
+    -- A canonical game account may be used from both Telegram and Bale.
+    -- Existing rows are already namespaced by the transport adapter: Telegram
+    -- IDs are non-negative and Bale IDs are <= -2 (-1 is the bot player).
+    CREATE TABLE user_platforms (
+        user_id INTEGER NOT NULL,
+        platform TEXT NOT NULL CHECK (platform IN ('telegram', 'bale')),
+        external_id INTEGER NOT NULL,
+        linked_at INTEGER NOT NULL,
+        PRIMARY KEY (platform, external_id),
+        UNIQUE (user_id, platform)
+    );
+    CREATE INDEX idx_user_platforms_user ON user_platforms(user_id, platform);
+
+    INSERT OR IGNORE INTO user_platforms (user_id, platform, external_id, linked_at)
+        SELECT
+            telegram_id,
+            CASE WHEN telegram_id <= -2 THEN 'bale' ELSE 'telegram' END,
+            CASE WHEN telegram_id <= -2 THEN -telegram_id - 2 ELSE telegram_id END,
+            updated_at
+        FROM users
+        WHERE telegram_id != -1;
+
+    CREATE TABLE account_link_tokens (
+        token TEXT PRIMARY KEY,
+        user_id INTEGER NOT NULL,
+        target_platform TEXT NOT NULL CHECK (target_platform IN ('telegram', 'bale')),
+        created_at INTEGER NOT NULL,
+        expires_at INTEGER NOT NULL,
+        used_at INTEGER
+    );
+    CREATE INDEX idx_account_link_tokens_active
+        ON account_link_tokens(user_id, target_platform, expires_at)
+        WHERE used_at IS NULL;
+    """,
+    """
+    -- Native Bale wallet payments use the same canonical users as all other
+    -- payments.  The setting defaults to enabled, but it is effective only
+    -- when the deployment supplies a provider token.  An administrator can
+    -- turn it off without changing the environment secret.
+    ALTER TABLE payment_settings ADD COLUMN bale_payment_enabled INTEGER NOT NULL DEFAULT 1
+        CHECK (bale_payment_enabled IN (0, 1));
+
+    CREATE TABLE native_payment_transactions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        platform TEXT NOT NULL CHECK (platform = 'bale'),
+        user_id INTEGER NOT NULL REFERENCES users(telegram_id),
+        payload TEXT NOT NULL UNIQUE,
+        amount_irr INTEGER NOT NULL CHECK (amount_irr > 0),
+        currency TEXT NOT NULL CHECK (currency = 'IRR'),
+        status TEXT NOT NULL DEFAULT 'pending'
+            CHECK (status IN ('pending', 'paid', 'failed')),
+        telegram_payment_charge_id TEXT,
+        provider_payment_charge_id TEXT,
+        created_at INTEGER NOT NULL,
+        paid_at INTEGER
+    );
+    CREATE UNIQUE INDEX idx_native_payment_telegram_charge
+        ON native_payment_transactions(platform, telegram_payment_charge_id)
+        WHERE telegram_payment_charge_id IS NOT NULL;
+    CREATE UNIQUE INDEX idx_native_payment_provider_charge
+        ON native_payment_transactions(platform, provider_payment_charge_id)
+        WHERE provider_payment_charge_id IS NOT NULL;
+    CREATE INDEX idx_native_payment_user_status
+        ON native_payment_transactions(user_id, status, created_at DESC);
+    """,
+    """
+    -- Activation is tracked per messenger.  Existing paid accounts were
+    -- previously shared across both messengers, so preserve that access on
+    -- both platform columns when upgrading.
+    ALTER TABLE users ADD COLUMN telegram_activated INTEGER NOT NULL DEFAULT 0
+        CHECK (telegram_activated IN (0, 1));
+    ALTER TABLE users ADD COLUMN bale_activated INTEGER NOT NULL DEFAULT 0
+        CHECK (bale_activated IN (0, 1));
+    UPDATE users
+    SET telegram_activated = is_activated,
+        bale_activated = is_activated
+    WHERE is_activated = 1;
+
+    ALTER TABLE payment_receipts ADD COLUMN activation_scope TEXT NOT NULL DEFAULT 'telegram'
+        CHECK (activation_scope IN ('telegram', 'bale', 'both'));
+    ALTER TABLE payment_receipts ADD COLUMN platform TEXT NOT NULL DEFAULT 'telegram'
+        CHECK (platform IN ('telegram', 'bale'));
+    ALTER TABLE native_payment_transactions ADD COLUMN activation_scope TEXT NOT NULL DEFAULT 'bale'
+        CHECK (activation_scope IN ('telegram', 'bale', 'both'));
+
+    ALTER TABLE users ADD COLUMN referral_primary_platform TEXT
+        CHECK (referral_primary_platform IS NULL OR referral_primary_platform IN ('telegram', 'bale'));
+    ALTER TABLE users ADD COLUMN referral_first_unlocked_at INTEGER;
+    ALTER TABLE users ADD COLUMN referral_second_unlocked_at INTEGER;
+    """,
 )

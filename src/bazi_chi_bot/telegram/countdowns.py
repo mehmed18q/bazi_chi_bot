@@ -111,7 +111,7 @@ def register_handlers(
                 "فرمت فرمان درست نیست. قالب فرمان:\n"
                 "<code>/countdown @username YYYY-MM-DD HH:MM</code>\n\n"
                 f"🕰 منطقهٔ زمانی: <b>{escape(countdown_timezone)}</b>\n"
-                "می‌توانی به‌جای نام کاربری، شناسهٔ عددی تلگرام را بنویسی."
+                "می‌توانی به‌جای نام کاربری، شناسهٔ عددی کاربر را بنویسی."
             )
             return
 

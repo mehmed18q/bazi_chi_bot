@@ -53,7 +53,7 @@ class CountdownScheduler:
             # Clearing before the database read avoids losing a wake-up that
             # arrives between reading the next job and beginning the wait.
             self._wake_event.clear()
-            countdown = await self.service.next_due()
+            countdown = await self.service.next_due(getattr(self.bot, "platform", "telegram"))
             if countdown is None:
                 await self._wait(None)
                 continue

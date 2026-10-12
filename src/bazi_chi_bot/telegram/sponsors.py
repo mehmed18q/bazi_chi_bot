@@ -140,9 +140,12 @@ async def show_sponsor_gate(
 class SponsorMembershipMiddleware(BaseMiddleware):
     """Prevent bypassing the sponsor gate through old buttons or direct commands."""
 
-    def __init__(self, service: GameService, admin_ids: frozenset[int]) -> None:
+    def __init__(
+        self, service: GameService, admin_ids: frozenset[int], platform: str = "telegram"
+    ) -> None:
         self.service = service
         self.admin_ids = admin_ids
+        self.platform = platform
 
     async def __call__(
         self,
@@ -172,7 +175,7 @@ class SponsorMembershipMiddleware(BaseMiddleware):
             return await handler(event, data)
 
         user = await self.service.get_user(event.from_user.id)
-        if user is None or not user.is_activated:
+        if user is None or not user.is_platform_activated(self.platform):
             # The payment middleware owns access control until activation.
             return await handler(event, data)
 

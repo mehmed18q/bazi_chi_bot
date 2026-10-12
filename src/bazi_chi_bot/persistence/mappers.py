@@ -106,4 +106,6 @@ def _user_from_row(row: aiosqlite.Row) -> User:
         nickname=nickname,
         nickname_is_custom=bool(row["nickname_is_custom"]),
         telegram_display_name=row["display_name"],
+        telegram_activated=bool(row["telegram_activated"]),
+        bale_activated=bool(row["bale_activated"]),
     )

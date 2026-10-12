@@ -20,17 +20,32 @@ class ReferralAdminSetup(StatesGroup):
     waiting_for_required = State()
 
 
-async def referral_status_text(service: GameService, user_id: int, premium: bool) -> str:
+async def referral_status_text(
+    service: GameService,
+    user_id: int,
+    premium: bool,
+    platform: str = "telegram",
+) -> str:
     stats = await service.referrals.stats(user_id)
-    progress = (
-        "اشتراک ویژه‌ات فعال است. ⭐"
-        if premium else
-        f"برای فعال‌شدن رایگان اشتراک ویژه، <b>{stats.remaining}</b> "
-        "دعوتِ فعال‌شدهٔ دیگر لازم داری."
+    first_platform = stats.primary_platform or platform
+    second_platform = "bale" if first_platform == "telegram" else "telegram"
+    labels = {"telegram": "تلگرام", "bale": "بله"}
+    first_progress = (
+        "فعال شده ✅"
+        if stats.first_unlocked or stats.activated >= stats.required
+        else f"برای فعال‌شدن رایگان {labels[first_platform]}، {stats.remaining} دعوت فعال دیگر لازم داری"
     )
+    second_progress = (
+        "فعال شده ✅"
+        if stats.second_unlocked or stats.activated >= stats.second_target
+        else f"{stats.remaining_second} دعوت فعال دیگر تا فعال‌شدن {labels[second_platform]}"
+    )
+    progress = "اشتراک ویژه‌ات فعال است. ⭐" if premium else first_progress
     return (
         f"👥 دعوت‌ها: <b>{stats.invited}</b> نفر | فعال‌شده‌ها: "
-        f"<b>{stats.activated}</b> از <b>{stats.required}</b> نفر. {progress}"
+        f"<b>{stats.activated}</b> از <b>{stats.required}</b> نفر. {progress}\n"
+        f"🎯 هدف {labels[first_platform]}: <b>{stats.required}</b> دعوت فعال — {first_progress}\n"
+        f"🎯 هدف {labels[second_platform]}: <b>{stats.second_target}</b> دعوت فعال — {second_progress}"
     )
 
 
@@ -53,7 +68,7 @@ async def deliver_referral_notices(message: Message, service: GameService) -> No
     if unlocked:
         await message.answer(
             "🎉 <b>تعداد دعوت‌های فعال‌شده‌ات به حد نصاب رسید!</b>\n"
-            "اشتراک ویژهٔ بدون انقضای تو رایگان فعال شد. ⭐"
+            "فعال‌سازی رایگان یکی از پیام‌رسان‌های هدفت انجام شد؛ وضعیت هدف بعدی را در همین بخش ببین. ⭐"
         )
         await service.referrals.mark_notices(user_id, [], True)
 
@@ -67,15 +82,21 @@ def register_handlers(
         user = await service.get_user(callback.from_user.id)
         if user is None:
             return
+        current_platform = getattr(bot, "platform", "telegram")
+        await service.referrals.set_primary_platform(user.telegram_id, current_platform)
         token = await service.referrals.code_for(user.telegram_id)
         bot_user = await bot.get_me()
-        link = f"https://t.me/{bot_user.username}?start=ref_{token}"
+        base = "https://ble.ir" if getattr(bot, "platform", "telegram") == "bale" else "https://t.me"
+        link = f"{base}/{bot_user.username}?start=ref_{token}"
         builder = InlineKeyboardBuilder()
-        builder.button(
-            text="📤 ارسال دعوت‌نامه",
-            url="https://t.me/share/url?url=" + quote(link, safe="")
+        if getattr(bot, "platform", "telegram") == "bale":
+            builder.button(text="🔗 بازکردن لینک دعوت", url=link)
+        else:
+            builder.button(
+                text="📤 ارسال دعوت‌نامه",
+                url="https://t.me/share/url?url=" + quote(link, safe="")
                 + "&text=" + quote("بیا با بازی‌چی بازی کنیم! 🎮", safe=""),
-        )
+            )
         builder.button(text="🏠 منوی اصلی", callback_data="menu:home")
         builder.adjust(1)
         await safe_edit(
@@ -84,7 +105,12 @@ def register_handlers(
             "برای هر دوستی که با لینک تو وارد ربات شود ۱ امتیاز می‌گیری؛ "
             "پس از فعال‌شدن اشتراکش، ۱ امتیاز دیگر هم می‌گیری. "
             "دعوت از راه لینک بازی یا مسابقهٔ گروهی هم ثبت می‌شود.\n\n"
-            + await referral_status_text(service, user.telegram_id, user.is_activated)
+            + await referral_status_text(
+                service,
+                user.telegram_id,
+                user.is_platform_activated(current_platform),
+                current_platform,
+            )
             + f"\n\n🔗 لینک اختصاصی تو:\n<code>{link}</code>",
             builder.as_markup(),
         )
@@ -103,7 +129,9 @@ def register_handlers(
         builder.adjust(1)
         await safe_edit(
             callback,
-            f"👥 <b>تنظیمات دعوت</b>\n\nحد نصاب فعال‌سازی: <b>{required}</b> نفر.\n"
+            f"👥 <b>تنظیمات دعوت</b>\n\n"
+            f"هدف پیام‌رسان اول: <b>{required}</b> دعوت فعال؛ "
+            f"هدف پیام‌رسان دوم: <b>{(required * 3 + 1) // 2}</b> دعوت فعال.\n"
             "هر دعوت ۱ امتیاز و هر فعال‌سازی دعوت‌شونده ۱ امتیاز دیگر دارد.",
             builder.as_markup(),
         )

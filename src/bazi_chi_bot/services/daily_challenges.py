@@ -189,13 +189,25 @@ class DailyChallengeService:
                 )
 
     async def next_notification(
-        self, skip: set[tuple[str, int, str]] | None = None
+        self,
+        skip: set[tuple[str, int, str]] | None = None,
+        platform: str | None = None,
     ) -> tuple[str, int, str] | None:
         deferred = tuple(skip or ())
         exclusions = "".join(
             " AND NOT (challenge_date = ? AND user_id = ? AND event = ?)"
             for _ in deferred
         )
+        if platform == "telegram":
+            exclusions += (
+                " AND EXISTS (SELECT 1 FROM user_platforms up "
+                "WHERE up.user_id = daily_notifications.user_id AND up.platform = 'telegram')"
+            )
+        elif platform == "bale":
+            exclusions += (
+                " AND EXISTS (SELECT 1 FROM user_platforms up "
+                "WHERE up.user_id = daily_notifications.user_id AND up.platform = 'bale')"
+            )
         async with self.database.connect() as connection:
             row = await (
                 await connection.execute(
@@ -257,37 +269,6 @@ class DailyChallengeService:
             result = "🌤 در چالش شرکت کردی، اما امتیاز امروز را نگرفتی. فردا دوباره تلاش کن."
         else:
             result = "⌛ در چالش امروز شرکت نکردی و امتیازش را از دست دادی. فردا دوباره بیا!"
-        detail = ""
-        if challenge.game_type is GameType.WORD_GUESS:
-            async with self.database.connect() as connection:
-                words = await (
-                    await connection.execute(
-                        """SELECT a.hand_number, a.word FROM bot_word_assignments a
-                           JOIN games g ON g.id = a.game_id
-                           WHERE g.daily_challenge_date = ? AND a.user_id = ?
-                           ORDER BY a.hand_number""",
-                        (challenge.challenge_date, user_id),
-                    )
-                ).fetchall()
-            if words:
-                detail = "\n🔐 کلمه‌های مخفی ربات برای تو: " + "، ".join(
-                    f"دور {row['hand_number']}: <b>{row['word']}</b>" for row in words
-                )
-        elif challenge.secrets:
-            first_bot_hand = 0 if challenge.bot_starts else 1
-            bot_hands = [
-                (index + 1, challenge.secrets[index])
-                for index in range(first_bot_hand, len(challenge.secrets), 2)
-            ]
-            if challenge.game_type is GameType.MASTERMIND:
-                from ..rules import MASTERMIND_COLOR_EMOJIS
-
-                detail = "\n🎨 کدهای مخفی ربات: " + "، ".join(
-                    f"دور {number}: " + " ".join(MASTERMIND_COLOR_EMOJIS[color] for color in secret)
-                    for number, secret in bot_hands
-                )
-            elif challenge.game_type is GameType.GOL_YA_POOCH:
-                detail = "\n🌸 مشت‌های دارای گل ربات: " + "، ".join(
-                    f"دست {number}: <b>{secret}</b>" for number, secret in bot_hands
-                )
-        return f"🏁 <b>چالش امروز تمام شد.</b>\n{result}\nبازی امروز: <b>{title}</b>.{detail}"
+        # The end notice is intentionally spoiler-free. Hidden words, codes,
+        # and moves stay in the private game record and are never announced.
+        return f"🏁 <b>چالش امروز تمام شد.</b>\n{result}\nبازی امروز: <b>{title}</b>."

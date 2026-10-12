@@ -10,10 +10,36 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from ..models import Game, GamePhase, GameStatus, GameType, User
 from ..rules import MASTERMIND_COLOR_EMOJIS, MASTERMIND_COLORS
 
+_BALE_BOT_URL: str | None = None
+_TELEGRAM_BOT_URL: str | None = None
+
+
+def configure_platform_links(
+    *, telegram_username: str | None = None, bale_username: str | None = None
+) -> None:
+    """Set cross-messenger links shown in the shared main menu."""
+    global _BALE_BOT_URL, _TELEGRAM_BOT_URL
+    _TELEGRAM_BOT_URL = (
+        f"https://t.me/{telegram_username}" if telegram_username else None
+    )
+    _BALE_BOT_URL = f"https://ble.ir/{bale_username}" if bale_username else None
+
+
+def platform_link_url(platform: str, token: str) -> str | None:
+    """Build a one-time account-link deep link for a configured bot."""
+    base = _BALE_BOT_URL if platform == "bale" else _TELEGRAM_BOT_URL
+    return f"{base}?start=link_{token}" if base else None
+
 
 def menu_keyboard(
-    has_active_games: bool = False, is_countdown_admin: bool = False
+    has_active_games: bool = False,
+    is_countdown_admin: bool = False,
+    *,
+    bale_bot_url: str | None = None,
+    telegram_bot_url: str | None = None,
 ) -> InlineKeyboardMarkup:
+    bale_bot_url = bale_bot_url or _BALE_BOT_URL
+    telegram_bot_url = telegram_bot_url or _TELEGRAM_BOT_URL
     builder = InlineKeyboardBuilder()
     builder.button(text="🎮 شروع بازی", callback_data="menu:new")
     builder.button(text="🏆 تورنومنت ⭐", callback_data="menu:tournament")
@@ -29,6 +55,10 @@ def menu_keyboard(
     builder.button(text="🏁 آخرین نتیجه", callback_data="menu:last")
     builder.button(text="❔ راهنما", callback_data="menu:help")
     builder.button(text="🛟 پشتیبانی", callback_data="menu:support")
+    if bale_bot_url:
+        builder.button(text="🟦 ورود/اتصال به بازوی بله", callback_data="account_link:bale")
+    if telegram_bot_url:
+        builder.button(text="✈️ ورود/اتصال به ربات تلگرام", callback_data="account_link:telegram")
     if is_countdown_admin:
         builder.button(text="⚙️ مدیریت ربات", callback_data="menu:admin")
     builder.adjust(2, 2, 1 if has_active_games else 2, 2, 2, 2, 1)
@@ -49,21 +79,48 @@ def admin_menu_keyboard() -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
-def payment_settings_keyboard() -> InlineKeyboardMarkup:
+def payment_settings_keyboard(*, bale_payment_enabled: bool = False) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(text="💰 تغییر مبلغ پایه", callback_data="admin_payment:set:amount")
     builder.button(text="💳 تغییر شماره کارت", callback_data="admin_payment:set:card")
     builder.button(text="👤 تغییر صاحب کارت", callback_data="admin_payment:set:holder")
+    builder.button(
+        text=("⏸️ غیرفعال‌کردن پرداخت بله" if bale_payment_enabled else "▶️ فعال‌کردن پرداخت بله"),
+        callback_data="admin_payment:bale:toggle",
+    )
     builder.button(text="↩️ مدیریت ربات", callback_data="menu:admin")
     builder.adjust(1)
     return builder.as_markup()
 
 
-def activation_keyboard() -> InlineKeyboardMarkup:
+def activation_keyboard(*, include_bale_payment: bool = False) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(text="📤 ارسال رسید پرداخت", callback_data="payment:send")
+    if include_bale_payment:
+        builder.button(text="🟦 پرداخت با کیف‌پول بله", callback_data="payment:bale")
     builder.button(text="🤖 بازی رایگان", callback_data="setup:solo")
     builder.button(text="🏠 منوی اصلی", callback_data="menu:home")
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def activation_scope_keyboard(
+    *, method: str, current_label: str, both_label: str = "هر دو پیام‌رسان",
+    include_current: bool = True, include_both: bool = True,
+) -> InlineKeyboardMarkup:
+    """Ask for the activation scope immediately before a payment begins."""
+    builder = InlineKeyboardBuilder()
+    if include_current:
+        builder.button(
+            text=current_label,
+            callback_data=f"payment:{method}:scope:current",
+        )
+    if include_both:
+        builder.button(
+            text=both_label,
+            callback_data=f"payment:{method}:scope:both",
+        )
+    builder.button(text="↩️ برگشت", callback_data="menu:premium")
     builder.adjust(1)
     return builder.as_markup()
 
@@ -80,7 +137,7 @@ def profile_name_keyboard(is_custom: bool = False) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(text="✏️ تغییر نام", callback_data="profile:name:change")
     if is_custom:
-        builder.button(text="🔄 استفاده از نام تلگرام", callback_data="profile:name:reset")
+        builder.button(text="🔄 استفاده از نام حساب", callback_data="profile:name:reset")
     builder.button(text="🏠 منوی اصلی", callback_data="menu:home")
     builder.adjust(1)
     return builder.as_markup()
@@ -132,9 +189,9 @@ def sponsor_admin_keyboard(sponsors: list[object]) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(text="➕ افزودن اسپانسر", callback_data="admin_sponsor:add")
     for sponsor in sponsors:
-        active = getattr(sponsor, "active")
-        sid = getattr(sponsor, "id")
-        label = ("✅ " if active else "⏸️ ") + str(getattr(sponsor, "title"))
+        active = sponsor.active
+        sid = sponsor.id
+        label = ("✅ " if active else "⏸️ ") + str(sponsor.title)
         builder.button(text=label[:64], callback_data=f"admin_sponsor:toggle:{sid}")
         builder.button(text="🗑 حذف", callback_data=f"admin_sponsor:delete:{sid}")
     builder.button(text="🏠 منوی اصلی", callback_data="menu:home")
@@ -154,10 +211,10 @@ def sponsor_kind_keyboard() -> InlineKeyboardMarkup:
 def required_sponsors_keyboard(sponsors: list[object], payload: str = "") -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     for sponsor in sponsors:
-        icon = "🤖" if getattr(sponsor, "kind") == "bot" else "📣"
+        icon = "🤖" if sponsor.kind == "bot" else "📣"
         builder.button(
-            text=f"{icon} ورود به {getattr(sponsor, 'title')}",
-            url=getattr(sponsor, "url"),
+            text=f"{icon} ورود به {sponsor.title}",
+            url=sponsor.url,
         )
     callback_data = f"sponsors:check:{payload}" if payload else "sponsors:check"
     builder.button(text="🔄 بررسی عضویت", callback_data=callback_data)

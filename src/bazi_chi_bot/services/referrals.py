@@ -16,10 +16,22 @@ class ReferralStats:
     invited: int
     activated: int
     required: int
+    second_required: int | None = None
+    primary_platform: str | None = None
+    first_unlocked: bool = False
+    second_unlocked: bool = False
 
     @property
     def remaining(self) -> int:
         return max(0, self.required - self.activated)
+
+    @property
+    def second_target(self) -> int:
+        return self.second_required or (self.required * 3 + 1) // 2
+
+    @property
+    def remaining_second(self) -> int:
+        return max(0, self.second_target - self.activated)
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,6 +45,16 @@ class ReferralNotice:
 class ReferralService:
     def __init__(self, database: Database) -> None:
         self.database = database
+
+    async def set_primary_platform(self, user_id: int, platform: str) -> None:
+        if platform not in {"telegram", "bale"}:
+            raise ValueError("Unknown platform")
+        async with self.database.transaction() as connection:
+            await connection.execute(
+                """UPDATE users SET referral_primary_platform = ?
+                   WHERE telegram_id = ? AND referral_primary_platform IS NULL""",
+                (platform, user_id),
+            )
 
     async def code_for(self, user_id: int) -> str:
         async with self.database.transaction() as connection:
@@ -137,7 +159,24 @@ class ReferralService:
                     "SELECT required_activations FROM referral_settings WHERE singleton_id = 1"
                 )
             ).fetchone()
-        return ReferralStats(row["invited"], row["activated"], setting[0])
+            user = await (
+                await connection.execute(
+                    """SELECT referral_primary_platform, referral_first_unlocked_at,
+                              referral_second_unlocked_at
+                       FROM users WHERE telegram_id = ?""",
+                    (user_id,),
+                )
+            ).fetchone()
+        required = int(setting[0])
+        return ReferralStats(
+            row["invited"],
+            row["activated"],
+            required,
+            (required * 3 + 1) // 2,
+            user["referral_primary_platform"] if user else None,
+            bool(user and user["referral_first_unlocked_at"]),
+            bool(user and user["referral_second_unlocked_at"]),
+        )
 
     async def required_activations(self) -> int:
         async with self.database.connect() as connection:
@@ -161,31 +200,106 @@ class ReferralService:
             )
             rows = await (
                 await connection.execute(
-                    """SELECT u.telegram_id FROM users u
-                       WHERE u.is_activated = 0 AND u.premium_revoked_by_admin = 0
-                         AND u.telegram_id != -1
-                         AND (SELECT count(*) FROM referrals r
-                              WHERE r.inviter_id = u.telegram_id
-                                AND r.activated_at IS NOT NULL) >= ?""",
-                    (required,),
+                    "SELECT telegram_id FROM users WHERE telegram_id != -1"
                 )
             ).fetchall()
             unlocked: list[int] = []
             for row in rows:
-                if await self._unlock(connection, row["telegram_id"], now):
+                count = await (
+                    await connection.execute(
+                        """SELECT count(*) FROM referrals
+                           WHERE inviter_id = ? AND activated_at IS NOT NULL""",
+                        (row["telegram_id"],),
+                    )
+                ).fetchone()
+                changed = await self._unlock_thresholds(
+                    connection, row["telegram_id"], int(count[0]), required, now
+                )
+                if changed:
                     unlocked.append(row["telegram_id"])
                     unlocked.extend(await self.on_activation(connection, row["telegram_id"], now))
         return unlocked
 
     @staticmethod
-    async def _unlock(connection: aiosqlite.Connection, user_id: int, now: int) -> bool:
+    async def _unlock_platform(
+        connection: aiosqlite.Connection,
+        user_id: int,
+        platform: str,
+        now: int,
+        stage: int,
+    ) -> bool:
+        if platform not in {"telegram", "bale"}:
+            return False
+        row = await (
+            await connection.execute(
+                "SELECT telegram_activated, bale_activated, premium_revoked_by_admin "
+                "FROM users WHERE telegram_id = ?",
+                (user_id,),
+            )
+        ).fetchone()
+        if row is None or row["premium_revoked_by_admin"]:
+            return False
+        changed = not bool(row[f"{platform}_activated"])
         cursor = await connection.execute(
-            """UPDATE users SET is_activated = 1, activation_approved_at = ?,
-                   activation_approved_by = NULL, referral_unlocked_at = ?, updated_at = ?
-               WHERE telegram_id = ? AND is_activated = 0 AND premium_revoked_by_admin = 0""",
-            (now, now, now, user_id),
+            f"""UPDATE users SET {platform}_activated = 1,
+                   is_activated = 1, activation_approved_at = ?,
+                   activation_approved_by = NULL,
+                   referral_unlocked_at = COALESCE(referral_unlocked_at, ?),
+                   referral_{'first' if stage == 1 else 'second'}_unlocked_at = ?,
+                   updated_at = ?
+               WHERE telegram_id = ? AND premium_revoked_by_admin = 0""",
+            (now, now, now, now, user_id),
         )
-        return cursor.rowcount == 1
+        return changed and cursor.rowcount == 1
+
+    @staticmethod
+    async def _unlock_thresholds(
+        connection: aiosqlite.Connection,
+        user_id: int,
+        count: int,
+        required: int,
+        now: int,
+    ) -> bool:
+        row = await (
+            await connection.execute(
+                """SELECT telegram_activated, bale_activated, referral_primary_platform,
+                          referral_first_unlocked_at, referral_second_unlocked_at,
+                          premium_revoked_by_admin
+                   FROM users WHERE telegram_id = ?""",
+                (user_id,),
+            )
+        ).fetchone()
+        if row is None or row["premium_revoked_by_admin"]:
+            return False
+        second_required = (required * 3 + 1) // 2
+        primary = row["referral_primary_platform"]
+        if primary not in {"telegram", "bale"}:
+            primary = "telegram" if not row["telegram_activated"] else "bale"
+            await connection.execute(
+                "UPDATE users SET referral_primary_platform = ? WHERE telegram_id = ?",
+                (primary, user_id),
+            )
+        changed = False
+        if count >= required and row["referral_first_unlocked_at"] is None:
+            changed = await ReferralService._unlock_platform(
+                connection, user_id, primary, now, 1
+            ) or changed
+            await connection.execute(
+                "UPDATE users SET referral_first_unlocked_at = COALESCE(referral_first_unlocked_at, ?) "
+                "WHERE telegram_id = ?",
+                (now, user_id),
+            )
+        if count >= second_required and row["referral_second_unlocked_at"] is None:
+            second = "bale" if primary == "telegram" else "telegram"
+            changed = await ReferralService._unlock_platform(
+                connection, user_id, second, now, 2
+            ) or changed
+            await connection.execute(
+                "UPDATE users SET referral_second_unlocked_at = COALESCE(referral_second_unlocked_at, ?) "
+                "WHERE telegram_id = ?",
+                (now, user_id),
+            )
+        return changed
 
     async def on_activation(
         self, connection: aiosqlite.Connection, user_id: int, now: int | None = None
@@ -228,7 +342,9 @@ class ReferralService:
                     (inviter_id,),
                 )
             ).fetchone()
-            if count[0] >= required[0] and await self._unlock(connection, inviter_id, current):
+            if await self._unlock_thresholds(
+                connection, inviter_id, int(count[0]), int(required[0]), current
+            ):
                 unlocked.append(inviter_id)
                 queue.append(inviter_id)
         return unlocked

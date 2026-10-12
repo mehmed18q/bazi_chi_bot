@@ -103,12 +103,12 @@ def profile_name_text(user: User) -> str:
     custom_note = (
         "\nاین نام را خودت انتخاب کرده‌ای."
         if user.nickname_is_custom
-        else "\nفعلاً نام حساب تلگرامت در بازی‌ها نمایش داده می‌شود."
+        else "\nفعلاً نام حساب این پیام‌رسان در بازی‌ها نمایش داده می‌شود."
     )
     return (
         "👤 <b>نام نمایشی تو</b>\n\n"
         f"نام داخل ربات: <b>{escape(user.display_name)}</b>\n"
-        f"نام حساب تلگرام: <b>{escape(telegram_name)}</b>"
+        f"نام حساب پیام‌رسان: <b>{escape(telegram_name)}</b>"
         f"{custom_note}\n\n"
         "می‌خواهی همین نام بماند یا آن را تغییر بدهی؟"
     )
@@ -116,6 +116,9 @@ def profile_name_text(user: User) -> str:
 
 async def refresh_profile_photo(service: GameService, bot: Bot, user_id: int) -> str | None:
     """Persist Telegram's reusable file_id; download URLs are temporary and expose the token."""
+    # getUserProfilePhotos is not part of Bale's documented Bot API.
+    if getattr(bot, "platform", "telegram") == "bale":
+        return None
     try:
         photos = await bot.get_user_profile_photos(user_id, limit=1)
     except TelegramAPIError:
@@ -128,8 +131,9 @@ async def refresh_profile_photo(service: GameService, bot: Bot, user_id: int) ->
 async def invite_url(bot: Bot, game: Game) -> str:
     bot_user = await bot.get_me()
     if not bot_user.username:
-        raise RuntimeError("Telegram bot has no username; deep links cannot be created")
-    return f"https://t.me/{bot_user.username}?start=join_{game.invite_token}"
+        raise RuntimeError("Bot has no username; deep links cannot be created")
+    base = "https://ble.ir" if getattr(bot, "platform", "telegram") == "bale" else "https://t.me"
+    return f"{base}/{bot_user.username}?start=join_{game.invite_token}"
 
 
 async def game_names(service: GameService, game: Game) -> dict[int, str]:

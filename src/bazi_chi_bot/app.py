@@ -9,12 +9,17 @@ from dataclasses import dataclass
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.client.session.aiohttp import AiohttpSession
+from aiogram.client.telegram import TelegramAPIServer
 from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramAPIError, TelegramNetworkError
 from aiogram.types import BotCommand, BotCommandScopeAllGroupChats, BotCommandScopeChat, User
 from aiohttp_socks import (
     ProxyConnectionError as AiohttpSocksProxyConnectionError,
+)
+from aiohttp_socks import (
     ProxyError as AiohttpSocksProxyError,
+)
+from aiohttp_socks import (
     ProxyTimeoutError as AiohttpSocksProxyTimeoutError,
 )
 
@@ -30,6 +35,8 @@ from .game import GameService
 from .handlers import build_router
 from .telegram.daily_worker import DailyChallengeWorker
 from .telegram.groups import build_group_router
+from .telegram.keyboards import configure_platform_links
+from .telegram.platform import PlatformBot, PlatformName, to_domain_id
 from .telegram.sponsors import deactivate_invalid_sponsors
 
 logger = logging.getLogger(__name__)
@@ -49,10 +56,11 @@ PROXY_CONNECTION_ERRORS = (
 
 @dataclass(slots=True)
 class TelegramConnection:
-    bot: Bot
+    bot: PlatformBot
     user: User
     proxy_number: int | None
     proxy_count: int
+    platform: PlatformName = "telegram"
 
 
 @dataclass(slots=True)
@@ -60,10 +68,23 @@ class StartupState:
     countdowns_queued: bool = False
 
 
-def _build_bot(settings: Settings, proxy_url: str | None) -> Bot:
-    session = AiohttpSession(proxy=proxy_url) if proxy_url is not None else None
-    return Bot(
-        token=settings.bot_token,
+def _build_bot(
+    settings: Settings,
+    proxy_url: str | None,
+    *,
+    platform: PlatformName = "telegram",
+    token: str | None = None,
+    api_base_url: str | None = None,
+) -> PlatformBot:
+    api = TelegramAPIServer.from_base(api_base_url) if api_base_url else None
+    session = (
+        AiohttpSession(proxy=proxy_url, **({"api": api} if api is not None else {}))
+        if proxy_url is not None or api is not None
+        else None
+    )
+    return PlatformBot(
+        token=token or settings.bot_token,
+        platform=platform,
         session=session,
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
     )
@@ -105,12 +126,48 @@ async def _connect_to_telegram(settings: Settings) -> TelegramConnection | None:
             user=user,
             proxy_number=index if proxy_url is not None else None,
             proxy_count=len(proxy_urls),
+            platform="telegram",
         )
 
     return None
 
 
+async def _connect_to_bale(settings: Settings) -> TelegramConnection | None:
+    """Return the first usable Bale connection, if a Bale token is configured."""
+    if not settings.bale_bot_token:
+        return None
+    logger.info("Testing direct Bale connection")
+    try:
+        bot = _build_bot(
+            settings,
+            None,
+            platform="bale",
+            token=settings.bale_bot_token,
+            api_base_url=settings.bale_api_base_url,
+        )
+        user = await bot.get_me()
+    except ValueError:
+        logger.warning("Bale API configuration is invalid")
+        return None
+    except (TelegramNetworkError, *PROXY_CONNECTION_ERRORS, TimeoutError, OSError) as error:
+        logger.warning("Bale direct connection is unavailable: %s", error)
+        await bot.session.close()
+        return None
+    return TelegramConnection(
+        bot=bot,
+        user=user,
+        proxy_number=None,
+        proxy_count=0,
+        platform="bale",
+    )
+
+
 async def _register_bot_commands(bot: Bot, admin_ids: frozenset[int]) -> None:
+    # Bale's documented Bot API does not expose Telegram's command-menu
+    # methods. Commands still work when typed, so skip this optional API call.
+    if getattr(bot, "platform", "telegram") == "bale":
+        logger.info("Skipping Telegram command-menu registration for Bale")
+        return
     logger.info("Registering bot commands")
     public_commands = [
         BotCommand(command="start", description="شروع و منوی اصلی"),
@@ -148,11 +205,14 @@ async def _monitor_connection(
     bot: Bot,
     interval: float = RECONNECT_INTERVAL_SECONDS,
 ) -> None:
-    """Verify that the selected proxy can still reach Telegram every interval."""
+    """Verify that the selected messenger API is reachable every interval."""
     while True:
         await asyncio.sleep(interval)
         await bot.get_me()
-        logger.debug("Telegram connection health check succeeded")
+        logger.debug(
+            "%s connection health check succeeded",
+            getattr(bot, "platform", "messenger").capitalize(),
+        )
 
 
 async def _poll_with_connection_monitor(dispatcher: Dispatcher, bot: Bot) -> None:
@@ -198,6 +258,7 @@ async def _serve_connection(
     countdown_service: CountdownService,
     admin_ids: frozenset[int],
     payment_reviewer_ids: frozenset[int],
+    external_admin_ids: frozenset[int],
     countdown_timezone: str,
     startup_state: StartupState,
 ) -> None:
@@ -217,17 +278,23 @@ async def _serve_connection(
             countdown_admin_ids=admin_ids,
             payment_reviewer_ids=payment_reviewer_ids,
             countdown_timezone=countdown_timezone,
+            platform=connection.platform,
         )
     )
     dispatcher.include_router(
-        build_group_router(service, admin_ids=admin_ids | payment_reviewer_ids)
+        build_group_router(
+            service,
+            admin_ids=admin_ids | payment_reviewer_ids,
+            platform=connection.platform,
+        )
     )
     scheduler_task: asyncio.Task[None] | None = None
     daily_task: asyncio.Task[None] | None = None
 
     try:
         logger.info(
-            "Connected to Telegram as @%s (%s)",
+            "Connected to %s as @%s (%s)",
+            connection.platform.capitalize(),
             connection.user.username,
             connection.user.id,
         )
@@ -238,7 +305,7 @@ async def _serve_connection(
                 sponsor.title,
                 sponsor.chat_id,
             )
-        await _register_bot_commands(bot, admin_ids)
+        await _register_bot_commands(bot, external_admin_ids)
         logger.info("Bot commands registered; starting long polling")
         if not startup_state.countdowns_queued:
             startup_countdowns = await countdown_service.make_all_active_due()
@@ -267,46 +334,93 @@ async def run_bot(settings: Settings) -> None:
     database = Database(settings.database_path)
     await database.initialize()
     logger.info("Database initialized at %s", settings.database_path)
-    countdown_admin_ids = parse_admin_ids(settings.admin_telegram_ids)
-    payment_reviewer_ids = parse_admin_ids(settings.payment_reviewer_telegram_ids)
-    admin_ids = countdown_admin_ids | payment_reviewer_ids
-    service = GameService(database, activation_exempt_ids=admin_ids)
-    countdown_service = CountdownService(database, activation_exempt_ids=admin_ids)
+    telegram_countdown_admin_ids = parse_admin_ids(settings.admin_telegram_ids)
+    telegram_payment_reviewer_ids = parse_admin_ids(settings.payment_reviewer_telegram_ids)
+    bale_countdown_admin_ids = frozenset(
+        to_domain_id("bale", value) for value in parse_admin_ids(settings.bale_admin_ids)
+    )
+    bale_payment_reviewer_ids = frozenset(
+        to_domain_id("bale", value) for value in parse_admin_ids(settings.bale_payment_reviewer_ids)
+    )
+    all_admin_ids = (
+        telegram_countdown_admin_ids
+        | telegram_payment_reviewer_ids
+        | bale_countdown_admin_ids
+        | bale_payment_reviewer_ids
+    )
+    service = GameService(
+        database,
+        activation_exempt_ids=all_admin_ids,
+        bale_payment_provider_token=settings.bale_payment_provider_token,
+    )
+    countdown_service = CountdownService(database, activation_exempt_ids=all_admin_ids)
     startup_state = StartupState()
 
     while True:
-        connection = await _connect_to_telegram(settings)
-        if connection is None:
+        telegram_connection, bale_connection = await asyncio.gather(
+            _connect_to_telegram(settings), _connect_to_bale(settings)
+        )
+        connections = [
+            connection
+            for connection in (telegram_connection, bale_connection)
+            if connection is not None
+        ]
+        if not connections:
             logger.error(
-                "No Telegram connection is available; testing all connections again in %s seconds",
+                "No messenger connection is available; testing all connections again in %s seconds",
                 RECONNECT_INTERVAL_SECONDS,
             )
             await asyncio.sleep(RECONNECT_INTERVAL_SECONDS)
             continue
 
-        if connection.proxy_number is None:
-            logger.info("Using direct Telegram connection")
-        else:
-            logger.info(
-                "Using Telegram proxy %s/%s",
-                connection.proxy_number,
-                connection.proxy_count,
-            )
+        telegram_bot = telegram_connection.bot if telegram_connection else None
+        bale_bot = bale_connection.bot if bale_connection else None
+        if telegram_bot is not None:
+            telegram_bot.peer = bale_bot
+            telegram_bot.identity_resolver = service.platform_external_id
+        if bale_bot is not None:
+            bale_bot.peer = telegram_bot
+            bale_bot.identity_resolver = service.platform_external_id
+        configure_platform_links(
+            telegram_username=telegram_connection.user.username if telegram_connection else None,
+            bale_username=bale_connection.user.username if bale_connection else None,
+        )
 
         try:
-            await _serve_connection(
-                connection,
-                service=service,
-                countdown_service=countdown_service,
-                admin_ids=admin_ids,
-                payment_reviewer_ids=payment_reviewer_ids,
-                countdown_timezone=settings.countdown_timezone,
-                startup_state=startup_state,
+            await asyncio.gather(
+                *(
+                    _serve_connection(
+                        connection,
+                        service=service,
+                        countdown_service=countdown_service,
+                        admin_ids=(
+                            telegram_countdown_admin_ids
+                            if connection.platform == "telegram"
+                            else bale_countdown_admin_ids
+                        ),
+                        payment_reviewer_ids=(
+                            telegram_payment_reviewer_ids
+                            if connection.platform == "telegram"
+                            else bale_payment_reviewer_ids
+                        ),
+                        external_admin_ids=(
+                            parse_admin_ids(settings.admin_telegram_ids)
+                            | parse_admin_ids(settings.payment_reviewer_telegram_ids)
+                            if connection.platform == "telegram"
+                            else parse_admin_ids(settings.bale_admin_ids)
+                            | parse_admin_ids(settings.bale_payment_reviewer_ids)
+                        ),
+                        countdown_timezone=settings.countdown_timezone,
+                        startup_state=startup_state,
+                    )
+                    for connection in connections
+                )
             )
-        except TelegramNetworkError:
-            logger.warning("Telegram connection was lost; testing all configured connections again")
+        except (TelegramNetworkError, *PROXY_CONNECTION_ERRORS, TimeoutError, OSError):
+            logger.warning("Messenger connection was lost; testing all configured connections again")
         else:
             return
         finally:
-            logger.info("Closing Telegram session")
-            await connection.bot.session.close()
+            for connection in connections:
+                logger.info("Closing %s session", connection.platform.capitalize())
+                await connection.bot.session.close()

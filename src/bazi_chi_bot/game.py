@@ -29,12 +29,12 @@ from .models import (
     Game,
     GameType,
     LeaderboardEntry,
-    MoveResult,
-    RpsResult,
     MastermindGuessResult,
     MastermindSelection,
+    MoveResult,
     PaymentReceipt,
     PaymentSettings,
+    RpsResult,
     Stats,
     Tournament,
     TurnResult,
@@ -47,10 +47,10 @@ from .services.challenges import ChallengeService
 from .services.daily_challenges import DailyChallengeService
 from .services.group_games import GroupGameService
 from .services.matches import MatchService
-from .services.solo import BotAdvance, SoloOpponent
-from .services.tournaments import TournamentService
 from .services.payments import PaymentService
 from .services.referrals import ReferralService
+from .services.solo import BotAdvance, SoloOpponent
+from .services.tournaments import TournamentService
 from .services.users import UserService
 
 
@@ -63,6 +63,7 @@ class GameService:
         choose_first_hider: Callable[[Sequence[int]], int] = secrets.choice,
         *,
         activation_exempt_ids: frozenset[int] = frozenset(),
+        bale_payment_provider_token: str | None = None,
     ) -> None:
         self.database = database
         self.users = UserService(database)
@@ -70,7 +71,11 @@ class GameService:
             database, choose_first_hider, activation_exempt_ids=activation_exempt_ids
         )
         self.referrals = ReferralService(database)
-        self.payments = PaymentService(database, self.referrals)
+        self.payments = PaymentService(
+            database,
+            self.referrals,
+            bale_provider_token=bale_payment_provider_token,
+        )
         self.challenges = ChallengeService(database)
         self.queries = GameRepository(database)
         self.solo = SoloOpponent(self.matches, self.queries)
@@ -105,6 +110,27 @@ class GameService:
     async def save_user(self, user: User) -> None:
         return await self.users.save_user(user)
 
+    async def resolve_platform_user(self, platform: str, external_id: int) -> int:
+        return await self.users.resolve_platform_user(platform, external_id)
+
+    async def platform_external_id(self, user_id: int, platform: str) -> int | None:
+        return await self.users.platform_external_id(user_id, platform)
+
+    async def platforms_for_user(self, user_id: int) -> tuple[tuple[str, int], ...]:
+        return await self.users.platforms_for_user(user_id)
+
+    async def create_account_link_token(
+        self, user_id: int, target_platform: str, *, ttl_seconds: int = 15 * 60
+    ) -> str:
+        return await self.users.create_account_link_token(
+            user_id, target_platform, ttl_seconds=ttl_seconds
+        )
+
+    async def link_platform_account(
+        self, current_user_id: int, token: str, platform: str | None = None
+    ) -> int | None:
+        return await self.users.link_platform_account(current_user_id, token, platform)
+
     async def register_user_entry(self, user: User, *, activation_exempt: bool = False) -> None:
         await self.users.register_entry(user, activation_exempt=activation_exempt)
 
@@ -116,6 +142,10 @@ class GameService:
 
     async def get_user(self, telegram_id: int) -> User | None:
         return await self.users.get_user(telegram_id)
+
+    async def is_platform_activated(self, user_id: int, platform: str) -> bool:
+        user = await self.get_user(user_id)
+        return bool(user and user.is_platform_activated(platform))
 
     async def all_users(self) -> list[User]:
         return await self.users.all_users()
@@ -133,19 +163,67 @@ class GameService:
         base_amount_toman: int | None = None,
         card_number: str | None = None,
         card_holder: str | None = None,
+        bale_payment_enabled: bool | None = None,
     ) -> PaymentSettings:
         return await self.payments.update_settings(
             admin_id,
             base_amount_toman=base_amount_toman,
             card_number=card_number,
             card_holder=card_holder,
+            bale_payment_enabled=bale_payment_enabled,
         )
 
-    async def expected_payment_amount(self, user: User) -> int:
-        return await self.payments.expected_amount(user)
+    async def bale_payment_available(self) -> bool:
+        return await self.payments.bale_payment_available()
+
+    async def bale_payment_token(self) -> str | None:
+        return await self.payments.bale_payment_token()
+
+    async def create_bale_payment_intent(
+        self, user_id: int, *, scope: str = "current"
+    ) -> tuple[str, int]:
+        return await self.payments.create_bale_payment_intent(user_id, scope=scope)
+
+    async def validate_bale_pre_checkout(
+        self, *, user_id: int, payload: str, amount_irr: int, currency: str
+    ) -> bool:
+        return await self.payments.validate_bale_pre_checkout(
+            user_id=user_id, payload=payload, amount_irr=amount_irr, currency=currency
+        )
+
+    async def complete_bale_payment(
+        self,
+        *,
+        user_id: int,
+        payload: str,
+        amount_irr: int,
+        currency: str,
+        telegram_payment_charge_id: str,
+        provider_payment_charge_id: str,
+    ) -> tuple[User | None, bool]:
+        return await self.payments.complete_bale_payment(
+            user_id=user_id,
+            payload=payload,
+            amount_irr=amount_irr,
+            currency=currency,
+            telegram_payment_charge_id=telegram_payment_charge_id,
+            provider_payment_charge_id=provider_payment_charge_id,
+        )
+
+    async def expected_payment_amount(
+        self, user: User, *, platform: str = "telegram", scope: str = "current"
+    ) -> int:
+        return await self.payments.expected_amount(user, platform=platform, scope=scope)
 
     async def set_user_activation(self, user_id: int, admin_id: int, active: bool) -> User | None:
         return await self.payments.set_user_activation(user_id, admin_id, active)
+
+    async def set_platform_activation(
+        self, user_id: int, platform: str, admin_id: int, active: bool
+    ) -> User | None:
+        return await self.payments.set_platform_activation(
+            user_id, platform, admin_id, active
+        )
 
     async def submit_payment_receipt(
         self,
@@ -153,11 +231,15 @@ class GameService:
         *,
         receipt_text: str | None = None,
         telegram_file_id: str | None = None,
+        platform: str = "telegram",
+        scope: str = "current",
     ) -> PaymentReceipt:
         return await self.payments.submit_receipt(
             user_id,
             receipt_text=receipt_text,
             telegram_file_id=telegram_file_id,
+            platform=platform,
+            scope=scope,
         )
 
     async def payment_receipt(self, receipt_id: int) -> PaymentReceipt | None:
